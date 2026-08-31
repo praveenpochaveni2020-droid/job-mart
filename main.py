@@ -12,18 +12,22 @@ from datetime import datetime, timezone
 
 # =========================================================
 # JOB MART - THEME 2
-# COMPLETE SINGLE FILE APP
+# COMPLETE SINGLE-FILE APPLICATION
+# Save this file as: main.py
+# Run:
+#   pip install fastapi uvicorn
+#   uvicorn main:app --reload --host 0.0.0.0 --port 5000
+# Open:
+#   http://127.0.0.1:5000
 # =========================================================
 
-app = FastAPI(
-    title="Job Mart",
-    version="2.0"
-)
+app = FastAPI(title="Job Mart", version="2.0.0")
 
+# Same-origin frontend is used, so CORS is mainly for API testing.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -31,7 +35,8 @@ app.add_middleware(
 BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = BASE_DIR / "job_mart.db"
 
-# Local development sessions
+# Development session store.
+# For production, use a persistent session store such as Redis.
 SESSIONS = {}
 
 
@@ -47,11 +52,17 @@ def db():
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def column_exists(conn, table, column):
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
 
 
 def init_db():
@@ -87,9 +98,7 @@ def init_db():
         application_email TEXT DEFAULT '',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
-        FOREIGN KEY(employer_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(employer_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS applications (
@@ -100,12 +109,8 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'applied',
         created_at TEXT NOT NULL,
         UNIQUE(job_id, applicant_id),
-        FOREIGN KEY(job_id)
-            REFERENCES jobs(id)
-            ON DELETE CASCADE,
-        FOREIGN KEY(applicant_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(applicant_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS saved_jobs (
@@ -114,12 +119,8 @@ def init_db():
         user_id INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE(job_id, user_id),
-        FOREIGN KEY(job_id)
-            REFERENCES jobs(id)
-            ON DELETE CASCADE,
-        FOREIGN KEY(user_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS notifications (
@@ -129,29 +130,45 @@ def init_db():
         message TEXT NOT NULL,
         is_read INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_jobs_status
-        ON jobs(status);
-
-    CREATE INDEX IF NOT EXISTS idx_jobs_employer
-        ON jobs(employer_id);
-
-    CREATE INDEX IF NOT EXISTS idx_apps_applicant
-        ON applications(applicant_id);
-
-    CREATE INDEX IF NOT EXISTS idx_apps_job
-        ON applications(job_id);
-
-    CREATE INDEX IF NOT EXISTS idx_saved_user
-        ON saved_jobs(user_id);
-
-    CREATE INDEX IF NOT EXISTS idx_notifications_user
-        ON notifications(user_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_employer ON jobs(employer_id);
+    CREATE INDEX IF NOT EXISTS idx_apps_applicant ON applications(applicant_id);
+    CREATE INDEX IF NOT EXISTS idx_apps_job ON applications(job_id);
+    CREATE INDEX IF NOT EXISTS idx_saved_user ON saved_jobs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
     """)
+
+    # Small compatibility migration for databases created by an older
+    # version of this single-file application.
+    migrations = {
+        "users": {
+            "phone": "TEXT DEFAULT ''",
+            "country": "TEXT DEFAULT ''",
+            "city": "TEXT DEFAULT ''",
+            "bio": "TEXT DEFAULT ''",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+        },
+        "jobs": {
+            "application_email": "TEXT DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+        },
+        "applications": {
+            "cover_letter": "TEXT DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'applied'",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    }
+
+    for table, columns in migrations.items():
+        for name, definition in columns.items():
+            if not column_exists(conn, table, name):
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                )
 
     conn.commit()
     conn.close()
@@ -166,40 +183,37 @@ init_db()
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
-
     hashed = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
         120000
     ).hex()
-
     return f"{salt}${hashed}"
 
 
 def verify_password(password: str, stored: str) -> bool:
     try:
         salt, saved_hash = stored.split("$", 1)
-
         check = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
             salt.encode("utf-8"),
             120000
         ).hex()
-
-        return secrets.compare_digest(
-            check,
-            saved_hash
-        )
-
+        return secrets.compare_digest(check, saved_hash)
     except Exception:
         return False
 
 
 def valid_email(email: str) -> bool:
-    pattern = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
-    return bool(re.match(pattern, email))
+    return bool(
+        re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email)
+    )
+
+
+def clean_text(value: str) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
 
 def public_user(user):
@@ -211,7 +225,8 @@ def public_user(user):
         "phone": user["phone"],
         "country": user["country"],
         "city": user["city"],
-        "bio": user["bio"]
+        "bio": user["bio"],
+        "created_at": user["created_at"],
     }
 
 
@@ -227,12 +242,10 @@ def current_user(request: Request):
         return None
 
     conn = db()
-
     user = conn.execute(
         "SELECT * FROM users WHERE id=?",
         (user_id,)
     ).fetchone()
-
     conn.close()
 
     if not user:
@@ -244,30 +257,53 @@ def current_user(request: Request):
 
 def require_user(request: Request):
     user = current_user(request)
-
     if not user:
         raise HTTPException(
             status_code=401,
             detail="Please login first"
         )
-
     return user
 
 
 def require_employer(request: Request):
     user = require_user(request)
-
     if user["role"] not in ("employer", "admin"):
         raise HTTPException(
             status_code=403,
             detail="Employer account required"
         )
-
     return user
 
 
+def add_notification(user_id, title, message, conn=None):
+    owns_connection = conn is None
+    if owns_connection:
+        conn = db()
+
+    conn.execute(
+        """
+        INSERT INTO notifications
+        (user_id, title, message, is_read, created_at)
+        VALUES (?,?,?,?,?)
+        """,
+        (user_id, title, message, 0, now())
+    )
+
+    if owns_connection:
+        conn.commit()
+        conn.close()
+
+
+def parse_skills(value):
+    return [
+        item.strip()
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+
 # =========================================================
-# MODELS
+# PYDANTIC MODELS
 # =========================================================
 
 class RegisterData(BaseModel):
@@ -293,6 +329,11 @@ class ProfileData(BaseModel):
     bio: str = Field(default="", max_length=1000)
 
 
+class PasswordData(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
 class JobData(BaseModel):
     title: str = Field(min_length=2, max_length=150)
     company: str = Field(min_length=2, max_length=150)
@@ -312,7 +353,7 @@ class ApplicationData(BaseModel):
 
 
 class ApplicationStatusData(BaseModel):
-    status: str
+    status: str = Field(min_length=2, max_length=30)
 
 
 # =========================================================
@@ -321,9 +362,8 @@ class ApplicationStatusData(BaseModel):
 
 @app.post("/api/register")
 def register(data: RegisterData):
-
-    name = data.name.strip()
-    email = data.email.strip().lower()
+    name = clean_text(data.name)
+    email = clean_text(data.email).lower()
     password = data.password
 
     if not valid_email(email):
@@ -332,8 +372,7 @@ def register(data: RegisterData):
             detail="Please enter a valid email address"
         )
 
-    role = data.role.strip().lower()
-
+    role = clean_text(data.role).lower()
     if role not in ("jobseeker", "employer"):
         role = "jobseeker"
 
@@ -354,17 +393,18 @@ def register(data: RegisterData):
     cur = conn.execute(
         """
         INSERT INTO users
-        (name,email,password,role,phone,country,city,created_at)
-        VALUES (?,?,?,?,?,?,?,?)
+        (name,email,password,role,phone,country,city,bio,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
         """,
         (
             name,
             email,
             hash_password(password),
             role,
-            data.phone.strip(),
-            data.country.strip(),
-            data.city.strip(),
+            clean_text(data.phone),
+            clean_text(data.country),
+            clean_text(data.city),
+            "",
             now()
         )
     )
@@ -383,8 +423,7 @@ def register(data: RegisterData):
 
 @app.post("/api/login")
 def login(data: LoginData):
-
-    email = data.email.strip().lower()
+    email = clean_text(data.email).lower()
 
     if not valid_email(email):
         raise HTTPException(
@@ -393,21 +432,13 @@ def login(data: LoginData):
         )
 
     conn = db()
-
     user = conn.execute(
         "SELECT * FROM users WHERE email=?",
         (email,)
     ).fetchone()
-
     conn.close()
 
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password"
-        )
-
-    if not verify_password(
+    if not user or not verify_password(
         data.password,
         user["password"]
     ):
@@ -417,7 +448,6 @@ def login(data: LoginData):
         )
 
     token = secrets.token_urlsafe(32)
-
     SESSIONS[token] = user["id"]
 
     response = JSONResponse({
@@ -440,10 +470,7 @@ def login(data: LoginData):
 
 @app.post("/api/logout")
 def logout(request: Request):
-
-    token = request.cookies.get(
-        "jobmart_session"
-    )
+    token = request.cookies.get("jobmart_session")
 
     if token:
         SESSIONS.pop(token, None)
@@ -463,7 +490,6 @@ def logout(request: Request):
 
 @app.get("/api/me")
 def me(request: Request):
-
     user = current_user(request)
 
     if not user:
@@ -487,37 +513,78 @@ def update_profile(
     data: ProfileData,
     request: Request
 ):
-
     user = require_user(request)
 
     conn = db()
-
     conn.execute(
         """
         UPDATE users
-        SET name=?,
-            phone=?,
-            country=?,
-            city=?,
-            bio=?
+        SET name=?, phone=?, country=?, city=?, bio=?
         WHERE id=?
         """,
         (
-            data.name.strip(),
-            data.phone.strip(),
-            data.country.strip(),
-            data.city.strip(),
-            data.bio.strip(),
+            clean_text(data.name),
+            clean_text(data.phone),
+            clean_text(data.country),
+            clean_text(data.city),
+            clean_text(data.bio),
             user["id"]
         )
     )
-
     conn.commit()
+
+    updated = conn.execute(
+        "SELECT * FROM users WHERE id=?",
+        (user["id"],)
+    ).fetchone()
+
     conn.close()
 
     return {
         "ok": True,
-        "message": "Profile updated"
+        "message": "Profile updated",
+        "user": public_user(updated)
+    }
+
+
+@app.put("/api/password")
+def change_password(
+    data: PasswordData,
+    request: Request
+):
+    user = require_user(request)
+
+    if not verify_password(
+        data.current_password,
+        user["password"]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Current password is incorrect"
+        )
+
+    if data.current_password == data.new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different"
+        )
+
+    conn = db()
+    conn.execute(
+        "UPDATE users SET password=? WHERE id=?",
+        (hash_password(data.new_password), user["id"])
+    )
+    conn.commit()
+    conn.close()
+
+    # Invalidate all local sessions for this user.
+    for token, user_id in list(SESSIONS.items()):
+        if user_id == user["id"]:
+            SESSIONS.pop(token, None)
+
+    return {
+        "ok": True,
+        "message": "Password changed. Please login again."
     }
 
 
@@ -525,19 +592,24 @@ def update_profile(
 # JOB API
 # =========================================================
 
+def job_dict(row, applied=False, saved=False):
+    result = dict(row)
+    result["skills_list"] = parse_skills(result.get("skills", ""))
+    result["applied"] = bool(applied)
+    result["saved"] = bool(saved)
+    return result
+
+
 @app.post("/api/jobs")
 def create_job(
     data: JobData,
     request: Request
 ):
-
     user = require_employer(request)
 
-    application_email = data.application_email.strip()
+    application_email = clean_text(data.application_email)
 
-    if application_email and not valid_email(
-        application_email
-    ):
+    if application_email and not valid_email(application_email):
         raise HTTPException(
             status_code=400,
             detail="Invalid application email"
@@ -549,35 +621,24 @@ def create_job(
         """
         INSERT INTO jobs
         (
-            employer_id,
-            title,
-            company,
-            category,
-            country,
-            location,
-            job_type,
-            work_mode,
-            salary,
-            description,
-            skills,
-            application_email,
-            status,
-            created_at
+            employer_id,title,company,category,country,
+            location,job_type,work_mode,salary,description,
+            skills,application_email,status,created_at
         )
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             user["id"],
-            data.title.strip(),
-            data.company.strip(),
-            data.category.strip(),
-            data.country.strip(),
-            data.location.strip(),
-            data.job_type.strip(),
-            data.work_mode.strip(),
-            data.salary.strip(),
-            data.description.strip(),
-            data.skills.strip(),
+            clean_text(data.title),
+            clean_text(data.company),
+            clean_text(data.category),
+            clean_text(data.country),
+            clean_text(data.location),
+            clean_text(data.job_type),
+            clean_text(data.work_mode),
+            clean_text(data.salary),
+            clean_text(data.description),
+            clean_text(data.skills),
             application_email,
             "active",
             now()
@@ -604,27 +665,26 @@ def list_jobs(
     job_type: str = "",
     work_mode: str = "",
     mine: bool = False,
+    include_closed: bool = False,
     request: Optional[Request] = None
 ):
-
     conn = db()
 
     sql = """
-        SELECT
-            j.*,
-            u.name AS employer_name
+        SELECT j.*, u.name AS employer_name
         FROM jobs j
-        JOIN users u
-            ON u.id=j.employer_id
-        WHERE j.status='active'
+        JOIN users u ON u.id=j.employer_id
+        WHERE 1=1
     """
 
     params = []
 
-    search = q.strip().lower()
+    if not include_closed:
+        sql += " AND j.status='active'"
+
+    search = clean_text(q).lower()
 
     if search:
-
         sql += """
         AND (
             LOWER(j.title) LIKE ?
@@ -632,47 +692,34 @@ def list_jobs(
             OR LOWER(j.description) LIKE ?
             OR LOWER(j.skills) LIKE ?
             OR LOWER(j.location) LIKE ?
+            OR LOWER(j.category) LIKE ?
         )
         """
-
         value = f"%{search}%"
-
         params.extend([
-            value,
-            value,
-            value,
-            value,
-            value
+            value, value, value,
+            value, value, value
         ])
 
-    if category.strip():
-        sql += """
-        AND LOWER(j.category)=LOWER(?)
-        """
-        params.append(category.strip())
+    if clean_text(category):
+        sql += " AND LOWER(j.category)=LOWER(?)"
+        params.append(clean_text(category))
 
-    if country.strip():
-        sql += """
-        AND LOWER(j.country)=LOWER(?)
-        """
-        params.append(country.strip())
+    if clean_text(country):
+        sql += " AND LOWER(j.country)=LOWER(?)"
+        params.append(clean_text(country))
 
-    if job_type.strip():
-        sql += """
-        AND LOWER(j.job_type)=LOWER(?)
-        """
-        params.append(job_type.strip())
+    if clean_text(job_type):
+        sql += " AND LOWER(j.job_type)=LOWER(?)"
+        params.append(clean_text(job_type))
 
-    if work_mode.strip():
-        sql += """
-        AND LOWER(j.work_mode)=LOWER(?)
-        """
-        params.append(work_mode.strip())
+    if clean_text(work_mode):
+        sql += " AND LOWER(j.work_mode)=LOWER(?)"
+        params.append(clean_text(work_mode))
 
     user = current_user(request) if request else None
 
     if mine:
-
         if not user:
             conn.close()
             raise HTTPException(
@@ -680,35 +727,44 @@ def list_jobs(
                 detail="Login required"
             )
 
-        if user["role"] not in (
-            "employer",
-            "admin"
-        ):
+        if user["role"] not in ("employer", "admin"):
             conn.close()
             raise HTTPException(
                 status_code=403,
                 detail="Employer account required"
             )
 
-        sql += """
-        AND j.employer_id=?
-        """
-
+        sql += " AND j.employer_id=?"
         params.append(user["id"])
 
-    sql += """
-    ORDER BY j.id DESC
-    """
+    sql += " ORDER BY j.id DESC"
 
-    rows = conn.execute(
-        sql,
-        params
-    ).fetchall()
+    rows = conn.execute(sql, params).fetchall()
 
-    result = [
-        dict(row)
-        for row in rows
-    ]
+    result = []
+
+    for row in rows:
+        applied = False
+        saved = False
+
+        if user:
+            applied = bool(conn.execute(
+                """
+                SELECT id FROM applications
+                WHERE job_id=? AND applicant_id=?
+                """,
+                (row["id"], user["id"])
+            ).fetchone())
+
+            saved = bool(conn.execute(
+                """
+                SELECT id FROM saved_jobs
+                WHERE job_id=? AND user_id=?
+                """,
+                (row["id"], user["id"])
+            ).fetchone())
+
+        result.append(job_dict(row, applied, saved))
 
     conn.close()
 
@@ -724,18 +780,13 @@ def get_job(
     job_id: int,
     request: Request
 ):
-
     conn = db()
 
     job = conn.execute(
         """
-        SELECT
-            j.*,
-            u.name AS employer_name,
-            u.email AS employer_email
+        SELECT j.*, u.name AS employer_name, u.email AS employer_email
         FROM jobs j
-        JOIN users u
-            ON u.id=j.employer_id
+        JOIN users u ON u.id=j.employer_id
         WHERE j.id=?
         """,
         (job_id,)
@@ -743,54 +794,33 @@ def get_job(
 
     if not job:
         conn.close()
-
         raise HTTPException(
             status_code=404,
             detail="Job not found"
         )
 
     user = current_user(request)
-
     applied = False
     saved = False
 
     if user:
+        applied = bool(conn.execute(
+            """
+            SELECT id FROM applications
+            WHERE job_id=? AND applicant_id=?
+            """,
+            (job_id, user["id"])
+        ).fetchone())
 
-        applied = bool(
-            conn.execute(
-                """
-                SELECT id
-                FROM applications
-                WHERE job_id=?
-                  AND applicant_id=?
-                """,
-                (
-                    job_id,
-                    user["id"]
-                )
-            ).fetchone()
-        )
+        saved = bool(conn.execute(
+            """
+            SELECT id FROM saved_jobs
+            WHERE job_id=? AND user_id=?
+            """,
+            (job_id, user["id"])
+        ).fetchone())
 
-        saved = bool(
-            conn.execute(
-                """
-                SELECT id
-                FROM saved_jobs
-                WHERE job_id=?
-                  AND user_id=?
-                """,
-                (
-                    job_id,
-                    user["id"]
-                )
-            ).fetchone()
-        )
-
-    result = dict(job)
-
-    result["applied"] = applied
-    result["saved"] = saved
-
+    result = job_dict(job, applied, saved)
     conn.close()
 
     return {
@@ -799,12 +829,81 @@ def get_job(
     }
 
 
+@app.put("/api/jobs/{job_id}")
+def update_job(
+    job_id: int,
+    data: JobData,
+    request: Request
+):
+    user = require_employer(request)
+
+    application_email = clean_text(data.application_email)
+
+    if application_email and not valid_email(application_email):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid application email"
+        )
+
+    conn = db()
+
+    job = conn.execute(
+        "SELECT * FROM jobs WHERE id=?",
+        (job_id,)
+    ).fetchone()
+
+    if not job:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    if job["employer_id"] != user["id"] and user["role"] != "admin":
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed"
+        )
+
+    conn.execute(
+        """
+        UPDATE jobs
+        SET title=?, company=?, category=?, country=?, location=?,
+            job_type=?, work_mode=?, salary=?, description=?,
+            skills=?, application_email=?
+        WHERE id=?
+        """,
+        (
+            clean_text(data.title),
+            clean_text(data.company),
+            clean_text(data.category),
+            clean_text(data.country),
+            clean_text(data.location),
+            clean_text(data.job_type),
+            clean_text(data.work_mode),
+            clean_text(data.salary),
+            clean_text(data.description),
+            clean_text(data.skills),
+            application_email,
+            job_id
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok": True,
+        "message": "Job updated successfully"
+    }
+
+
 @app.delete("/api/jobs/{job_id}")
 def close_job(
     job_id: int,
     request: Request
 ):
-
     user = require_employer(request)
 
     conn = db()
@@ -816,29 +915,20 @@ def close_job(
 
     if not job:
         conn.close()
-
         raise HTTPException(
             status_code=404,
             detail="Job not found"
         )
 
-    if (
-        job["employer_id"] != user["id"]
-        and user["role"] != "admin"
-    ):
+    if job["employer_id"] != user["id"] and user["role"] != "admin":
         conn.close()
-
         raise HTTPException(
             status_code=403,
             detail="Not allowed"
         )
 
     conn.execute(
-        """
-        UPDATE jobs
-        SET status='closed'
-        WHERE id=?
-        """,
+        "UPDATE jobs SET status='closed' WHERE id=?",
         (job_id,)
     )
 
@@ -848,6 +938,48 @@ def close_job(
     return {
         "ok": True,
         "message": "Job closed"
+    }
+
+
+@app.post("/api/jobs/{job_id}/reopen")
+def reopen_job(
+    job_id: int,
+    request: Request
+):
+    user = require_employer(request)
+
+    conn = db()
+
+    job = conn.execute(
+        "SELECT * FROM jobs WHERE id=?",
+        (job_id,)
+    ).fetchone()
+
+    if not job:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    if job["employer_id"] != user["id"] and user["role"] != "admin":
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed"
+        )
+
+    conn.execute(
+        "UPDATE jobs SET status='active' WHERE id=?",
+        (job_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok": True,
+        "message": "Job reopened"
     }
 
 
@@ -861,13 +993,9 @@ def apply_job(
     data: ApplicationData,
     request: Request
 ):
-
     user = require_user(request)
 
-    if user["role"] in (
-        "employer",
-        "admin"
-    ):
+    if user["role"] in ("employer", "admin"):
         raise HTTPException(
             status_code=403,
             detail="Employer accounts cannot apply"
@@ -877,84 +1005,63 @@ def apply_job(
 
     job = conn.execute(
         """
-        SELECT *
-        FROM jobs
-        WHERE id=?
-          AND status='active'
+        SELECT * FROM jobs
+        WHERE id=? AND status='active'
         """,
         (job_id,)
     ).fetchone()
 
     if not job:
         conn.close()
-
         raise HTTPException(
             status_code=404,
-            detail="Job not found"
+            detail="Active job not found"
+        )
+
+    if job["employer_id"] == user["id"]:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot apply to your own job"
         )
 
     existing = conn.execute(
         """
-        SELECT id
-        FROM applications
-        WHERE job_id=?
-          AND applicant_id=?
+        SELECT id FROM applications
+        WHERE job_id=? AND applicant_id=?
         """,
-        (
-            job_id,
-            user["id"]
-        )
+        (job_id, user["id"])
     ).fetchone()
 
     if existing:
         conn.close()
-
         raise HTTPException(
             status_code=400,
             detail="Already applied"
         )
 
-    conn.execute(
+    cur = conn.execute(
         """
         INSERT INTO applications
-        (
-            job_id,
-            applicant_id,
-            cover_letter,
-            status,
-            created_at
-        )
+        (job_id,applicant_id,cover_letter,status,created_at)
         VALUES (?,?,?,?,?)
         """,
         (
             job_id,
             user["id"],
-            data.cover_letter.strip(),
+            clean_text(data.cover_letter),
             "applied",
             now()
         )
     )
 
-    conn.execute(
-        """
-        INSERT INTO notifications
-        (
-            user_id,
-            title,
-            message,
-            created_at
-        )
-        VALUES (?,?,?,?)
-        """,
-        (
-            job["employer_id"],
-            "New job application",
-            (
-                f"{user['name']} applied "
-                f"for {job['title']}"
-            ),
-            now()
-        )
+    application_id = cur.lastrowid
+
+    add_notification(
+        job["employer_id"],
+        "New job application",
+        f'{user["name"]} applied for "{job["title"]}".',
+        conn
     )
 
     conn.commit()
@@ -962,101 +1069,99 @@ def apply_job(
 
     return {
         "ok": True,
-        "message": "Application submitted"
+        "message": "Application submitted",
+        "application_id": application_id
     }
 
 
-@app.get("/api/applications")
-def get_applications(
-    request: Request
-):
-
+@app.get("/api/applications/mine")
+def my_applications(request: Request):
     user = require_user(request)
 
     conn = db()
 
-    if user["role"] in (
-        "employer",
-        "admin"
-    ):
-
-        if user["role"] == "admin":
-
-            rows = conn.execute(
-                """
-                SELECT
-                    a.*,
-                    j.title,
-                    j.company,
-                    j.country,
-                    j.location,
-                    u.name AS applicant_name,
-                    u.email AS applicant_email,
-                    u.phone AS applicant_phone
-                FROM applications a
-                JOIN jobs j
-                    ON j.id=a.job_id
-                JOIN users u
-                    ON u.id=a.applicant_id
-                ORDER BY a.id DESC
-                """
-            ).fetchall()
-
-        else:
-
-            rows = conn.execute(
-                """
-                SELECT
-                    a.*,
-                    j.title,
-                    j.company,
-                    j.country,
-                    j.location,
-                    u.name AS applicant_name,
-                    u.email AS applicant_email,
-                    u.phone AS applicant_phone
-                FROM applications a
-                JOIN jobs j
-                    ON j.id=a.job_id
-                JOIN users u
-                    ON u.id=a.applicant_id
-                WHERE j.employer_id=?
-                ORDER BY a.id DESC
-                """,
-                (user["id"],)
-            ).fetchall()
-
-    else:
-
-        rows = conn.execute(
-            """
-            SELECT
-                a.*,
-                j.title,
-                j.company,
-                j.country,
-                j.location,
-                j.work_mode,
-                j.job_type
-            FROM applications a
-            JOIN jobs j
-                ON j.id=a.job_id
-            WHERE a.applicant_id=?
-            ORDER BY a.id DESC
-            """,
-            (user["id"],)
-        ).fetchall()
-
-    result = [
-        dict(row)
-        for row in rows
-    ]
+    rows = conn.execute(
+        """
+        SELECT
+            a.*,
+            j.title,
+            j.company,
+            j.location,
+            j.country,
+            j.work_mode,
+            j.job_type,
+            j.salary,
+            j.status AS job_status
+        FROM applications a
+        JOIN jobs j ON j.id=a.job_id
+        WHERE a.applicant_id=?
+        ORDER BY a.id DESC
+        """,
+        (user["id"],)
+    ).fetchall()
 
     conn.close()
 
     return {
         "ok": True,
-        "applications": result
+        "applications": [dict(row) for row in rows],
+        "count": len(rows)
+    }
+
+
+@app.get("/api/jobs/{job_id}/applications")
+def job_applications(
+    job_id: int,
+    request: Request
+):
+    user = require_employer(request)
+
+    conn = db()
+
+    job = conn.execute(
+        "SELECT * FROM jobs WHERE id=?",
+        (job_id,)
+    ).fetchone()
+
+    if not job:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    if job["employer_id"] != user["id"] and user["role"] != "admin":
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed"
+        )
+
+    rows = conn.execute(
+        """
+        SELECT
+            a.*,
+            u.name AS applicant_name,
+            u.email AS applicant_email,
+            u.phone AS applicant_phone,
+            u.country AS applicant_country,
+            u.city AS applicant_city,
+            u.bio AS applicant_bio
+        FROM applications a
+        JOIN users u ON u.id=a.applicant_id
+        WHERE a.job_id=?
+        ORDER BY a.id DESC
+        """,
+        (job_id,)
+    ).fetchall()
+
+    conn.close()
+
+    return {
+        "ok": True,
+        "job": dict(job),
+        "applications": [dict(row) for row in rows],
+        "count": len(rows)
     }
 
 
@@ -1066,36 +1171,31 @@ def update_application_status(
     data: ApplicationStatusData,
     request: Request
 ):
-
     user = require_employer(request)
 
     allowed = {
         "applied",
-        "viewed",
+        "reviewing",
         "shortlisted",
         "rejected",
-        "selected"
+        "hired"
     }
 
-    status = data.status.strip().lower()
+    status = clean_text(data.status).lower()
 
     if status not in allowed:
         raise HTTPException(
             status_code=400,
-            detail="Invalid status"
+            detail="Invalid application status"
         )
 
     conn = db()
 
     row = conn.execute(
         """
-        SELECT
-            a.*,
-            j.title,
-            j.employer_id
+        SELECT a.*, j.title, j.employer_id
         FROM applications a
-        JOIN jobs j
-            ON j.id=a.job_id
+        JOIN jobs j ON j.id=a.job_id
         WHERE a.id=?
         """,
         (application_id,)
@@ -1103,55 +1203,28 @@ def update_application_status(
 
     if not row:
         conn.close()
-
         raise HTTPException(
             status_code=404,
             detail="Application not found"
         )
 
-    if (
-        user["role"] != "admin"
-        and row["employer_id"] != user["id"]
-    ):
+    if row["employer_id"] != user["id"] and user["role"] != "admin":
         conn.close()
-
         raise HTTPException(
             status_code=403,
             detail="Not allowed"
         )
 
     conn.execute(
-        """
-        UPDATE applications
-        SET status=?
-        WHERE id=?
-        """,
-        (
-            status,
-            application_id
-        )
+        "UPDATE applications SET status=? WHERE id=?",
+        (status, application_id)
     )
 
-    conn.execute(
-        """
-        INSERT INTO notifications
-        (
-            user_id,
-            title,
-            message,
-            created_at
-        )
-        VALUES (?,?,?,?)
-        """,
-        (
-            row["applicant_id"],
-            "Application status updated",
-            (
-                f"Your application for "
-                f"{row['title']} is now {status}."
-            ),
-            now()
-        )
+    add_notification(
+        row["applicant_id"],
+        "Application updated",
+        f'Your application for "{row["title"]}" is now {status}.',
+        conn
     )
 
     conn.commit()
@@ -1164,7 +1237,7 @@ def update_application_status(
 
 
 # =========================================================
-# SAVED JOBS
+# SAVED JOBS API
 # =========================================================
 
 @app.post("/api/jobs/{job_id}/save")
@@ -1172,8 +1245,13 @@ def save_job(
     job_id: int,
     request: Request
 ):
-
     user = require_user(request)
+
+    if user["role"] in ("employer", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only jobseekers can save jobs"
+        )
 
     conn = db()
 
@@ -1184,7 +1262,6 @@ def save_job(
 
     if not job:
         conn.close()
-
         raise HTTPException(
             status_code=404,
             detail="Job not found"
@@ -1192,53 +1269,28 @@ def save_job(
 
     existing = conn.execute(
         """
-        SELECT id
-        FROM saved_jobs
-        WHERE job_id=?
-          AND user_id=?
+        SELECT id FROM saved_jobs
+        WHERE job_id=? AND user_id=?
         """,
-        (
-            job_id,
-            user["id"]
-        )
+        (job_id, user["id"])
     ).fetchone()
 
     if existing:
-
         conn.execute(
-            """
-            DELETE FROM saved_jobs
-            WHERE job_id=?
-              AND user_id=?
-            """,
-            (
-                job_id,
-                user["id"]
-            )
+            "DELETE FROM saved_jobs WHERE id=?",
+            (existing["id"],)
         )
-
         saved = False
-        message = "Removed from saved jobs"
-
+        message = "Job removed from saved jobs"
     else:
-
         conn.execute(
             """
             INSERT INTO saved_jobs
-            (
-                job_id,
-                user_id,
-                created_at
-            )
+            (job_id,user_id,created_at)
             VALUES (?,?,?)
             """,
-            (
-                job_id,
-                user["id"],
-                now()
-            )
+            (job_id, user["id"], now())
         )
-
         saved = True
         message = "Job saved"
 
@@ -1253,10 +1305,7 @@ def save_job(
 
 
 @app.get("/api/saved-jobs")
-def get_saved_jobs(
-    request: Request
-):
-
+def saved_jobs(request: Request):
     user = require_user(request)
 
     conn = db()
@@ -1265,41 +1314,31 @@ def get_saved_jobs(
         """
         SELECT
             j.*,
-            s.created_at AS saved_at,
             u.name AS employer_name
         FROM saved_jobs s
-        JOIN jobs j
-            ON j.id=s.job_id
-        JOIN users u
-            ON u.id=j.employer_id
+        JOIN jobs j ON j.id=s.job_id
+        JOIN users u ON u.id=j.employer_id
         WHERE s.user_id=?
         ORDER BY s.id DESC
         """,
         (user["id"],)
     ).fetchall()
 
-    result = [
-        dict(row)
-        for row in rows
-    ]
-
     conn.close()
 
     return {
         "ok": True,
-        "jobs": result
+        "jobs": [job_dict(row, saved=True) for row in rows],
+        "count": len(rows)
     }
 
 
 # =========================================================
-# NOTIFICATIONS
+# NOTIFICATIONS API
 # =========================================================
 
 @app.get("/api/notifications")
-def get_notifications(
-    request: Request
-):
-
+def notifications(request: Request):
     user = require_user(request)
 
     conn = db()
@@ -1310,32 +1349,34 @@ def get_notifications(
         FROM notifications
         WHERE user_id=?
         ORDER BY id DESC
+        LIMIT 100
         """,
         (user["id"],)
     ).fetchall()
 
-    result = [
-        dict(row)
-        for row in rows
-    ]
+    unread = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM notifications
+        WHERE user_id=? AND is_read=0
+        """,
+        (user["id"],)
+    ).fetchone()["count"]
 
     conn.close()
 
     return {
         "ok": True,
-        "notifications": result
+        "notifications": [dict(row) for row in rows],
+        "unread": unread
     }
 
 
-@app.post("/api/notifications/read")
-def read_notifications(
-    request: Request
-):
-
+@app.post("/api/notifications/read-all")
+def read_all_notifications(request: Request):
     user = require_user(request)
 
     conn = db()
-
     conn.execute(
         """
         UPDATE notifications
@@ -1344,143 +1385,146 @@ def read_notifications(
         """,
         (user["id"],)
     )
-
     conn.commit()
     conn.close()
 
     return {
-        "ok": True
+        "ok": True,
+        "message": "Notifications marked as read"
     }
 
 
-# =========================================================
-# DASHBOARD
-# =========================================================
-
-@app.get("/api/dashboard")
-def dashboard(
+@app.post("/api/notifications/{notification_id}/read")
+def read_notification(
+    notification_id: int,
     request: Request
 ):
-
     user = require_user(request)
 
     conn = db()
 
-    if user["role"] in (
-        "employer",
-        "admin"
-    ):
+    result = conn.execute(
+        """
+        UPDATE notifications
+        SET is_read=1
+        WHERE id=? AND user_id=?
+        """,
+        (notification_id, user["id"])
+    )
 
-        if user["role"] == "admin":
+    conn.commit()
+    conn.close()
 
-            jobs_count = conn.execute(
-                "SELECT COUNT(*) c FROM jobs"
-            ).fetchone()["c"]
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found"
+        )
 
-            active_jobs = conn.execute(
-                """
-                SELECT COUNT(*) c
-                FROM jobs
-                WHERE status='active'
-                """
-            ).fetchone()["c"]
+    return {
+        "ok": True,
+        "message": "Notification marked as read"
+    }
 
-            applications = conn.execute(
-                "SELECT COUNT(*) c FROM applications"
-            ).fetchone()["c"]
 
-        else:
+# =========================================================
+# DASHBOARD API
+# =========================================================
 
-            jobs_count = conn.execute(
-                """
-                SELECT COUNT(*) c
-                FROM jobs
-                WHERE employer_id=?
-                """,
-                (user["id"],)
-            ).fetchone()["c"]
+@app.get("/api/dashboard")
+def dashboard(request: Request):
+    user = require_user(request)
 
-            active_jobs = conn.execute(
-                """
-                SELECT COUNT(*) c
-                FROM jobs
-                WHERE employer_id=?
-                  AND status='active'
-                """,
-                (user["id"],)
-            ).fetchone()["c"]
+    conn = db()
 
-            applications = conn.execute(
-                """
-                SELECT COUNT(*) c
-                FROM applications a
-                JOIN jobs j
-                    ON j.id=a.job_id
-                WHERE j.employer_id=?
-                """,
-                (user["id"],)
-            ).fetchone()["c"]
+    if user["role"] in ("employer", "admin"):
+        total_jobs = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM jobs
+            WHERE employer_id=?
+            """,
+            (user["id"],)
+        ).fetchone()["count"]
+
+        active_jobs = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM jobs
+            WHERE employer_id=? AND status='active'
+            """,
+            (user["id"],)
+        ).fetchone()["count"]
+
+        total_applications = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM applications a
+            JOIN jobs j ON j.id=a.job_id
+            WHERE j.employer_id=?
+            """,
+            (user["id"],)
+        ).fetchone()["count"]
 
         unread = conn.execute(
             """
-            SELECT COUNT(*) c
+            SELECT COUNT(*) AS count
             FROM notifications
-            WHERE user_id=?
-              AND is_read=0
+            WHERE user_id=? AND is_read=0
             """,
             (user["id"],)
-        ).fetchone()["c"]
+        ).fetchone()["count"]
 
-        data = {
-            "role": user["role"],
-            "jobs_posted": jobs_count,
-            "active_jobs": active_jobs,
-            "applications": applications,
-            "notifications": unread
+        conn.close()
+
+        return {
+            "ok": True,
+            "role": "employer",
+            "stats": {
+                "total_jobs": total_jobs,
+                "active_jobs": active_jobs,
+                "total_applications": total_applications,
+                "unread_notifications": unread
+            }
         }
 
-    else:
+    total_applications = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM applications
+        WHERE applicant_id=?
+        """,
+        (user["id"],)
+    ).fetchone()["count"]
 
-        applications = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM applications
-            WHERE applicant_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
+    saved_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM saved_jobs
+        WHERE user_id=?
+        """,
+        (user["id"],)
+    ).fetchone()["count"]
 
-        saved = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM saved_jobs
-            WHERE user_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        unread = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM notifications
-            WHERE user_id=?
-              AND is_read=0
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        data = {
-            "role": "jobseeker",
-            "applications": applications,
-            "saved_jobs": saved,
-            "notifications": unread
-        }
+    unread = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM notifications
+        WHERE user_id=? AND is_read=0
+        """,
+        (user["id"],)
+    ).fetchone()["count"]
 
     conn.close()
 
     return {
         "ok": True,
-        "dashboard": data
+        "role": "jobseeker",
+        "stats": {
+            "total_applications": total_applications,
+            "saved_jobs": saved_count,
+            "unread_notifications": unread
+        }
     }
 
 
@@ -1489,58 +1533,45 @@ def dashboard(
 # =========================================================
 
 HTML = r"""
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
 <head>
-
-<meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1,viewport-fit=cover"
->
-
-<title>Job Mart</title>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0757c9">
+<title>Job Mart - Theme 2</title>
 
 <style>
-
-:root{
-    --blue:#146be8;
-    --blue2:#075bc7;
-    --navy:#062b4c;
-    --navy2:#0b3c64;
-    --bg:#f5f7fb;
-    --text:#182131;
-    --muted:#6b7280;
-    --line:#e4e8ef;
-    --white:#fff;
-    --green:#159b65;
-    --red:#d64545;
-    --shadow:0 8px 28px rgba(20,45,80,.08);
-}
-
 *{
     box-sizing:border-box;
 }
 
-html,body{
-    margin:0;
-    padding:0;
+:root{
+    --blue:#0757c9;
+    --blue2:#0a70e8;
+    --dark:#12335d;
+    --text:#172033;
+    --muted:#68758a;
+    --bg:#f3f6fb;
+    --card:#ffffff;
+    --line:#dfe6f0;
+    --success:#159447;
+    --danger:#d9363e;
+    --warning:#b77700;
+    --shadow:0 8px 28px rgba(15,45,90,.10);
+    --radius:16px;
+}
+
+html{
+    scroll-behavior:smooth;
 }
 
 body{
-    font-family:
-    Inter,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Arial,
-    sans-serif;
-
+    margin:0;
     background:var(--bg);
     color:var(--text);
+    font-family:Arial,"Noto Sans",sans-serif;
 }
 
 button,
@@ -1554,4709 +1585,2799 @@ button{
     cursor:pointer;
 }
 
-button:disabled{
-    opacity:.55;
-}
-
 a{
+    color:inherit;
     text-decoration:none;
 }
 
 .hidden{
-    display:none!important;
+    display:none !important;
 }
 
-#app{
-    min-height:100vh;
+.app-header{
+    position:sticky;
+    top:0;
+    z-index:1000;
+    height:66px;
+    background:linear-gradient(90deg,#064db8,#0a66d8);
+    color:#fff;
+    box-shadow:0 3px 14px rgba(0,0,0,.15);
 }
 
-/* =====================================================
-   COMMON
-===================================================== */
-
-.brand{
+.header-inner{
+    max-width:1500px;
+    height:100%;
+    margin:auto;
     display:flex;
     align-items:center;
-    gap:8px;
-    font-weight:800;
-    font-size:18px;
-    color:#172238;
+    gap:16px;
+    padding:0 18px;
 }
 
-.brand-mark{
-    width:31px;
-    height:31px;
-    border-radius:8px;
+.menu-btn{
+    width:42px;
+    height:42px;
+    border:0;
+    border-radius:10px;
+    color:#fff;
+    background:rgba(255,255,255,.12);
+    font-size:25px;
     display:grid;
     place-items:center;
-    background:var(--blue);
-    color:white;
+}
+
+.logo{
+    font-size:20px;
+    font-weight:800;
+    white-space:nowrap;
+    letter-spacing:.3px;
+}
+
+.header-search{
+    flex:1;
+    max-width:510px;
+    display:flex;
+    background:#fff;
+    border-radius:10px;
+    overflow:hidden;
+}
+
+.header-search input{
+    width:100%;
+    min-width:0;
+    border:0;
+    outline:0;
+    padding:12px 14px;
+}
+
+.header-search button{
+    width:52px;
+    border:0;
+    color:#fff;
+    background:#063f9e;
+    font-size:19px;
+}
+
+.header-links{
+    display:flex;
+    align-items:center;
+    gap:5px;
+    margin-left:auto;
+}
+
+.header-link{
+    border:0;
+    background:transparent;
+    color:#fff;
+    padding:10px 11px;
+    border-radius:9px;
+}
+
+.header-link:hover{
+    background:rgba(255,255,255,.12);
+}
+
+.icon-btn{
+    position:relative;
+    width:42px;
+    height:42px;
+    border:0;
+    border-radius:10px;
+    color:#fff;
+    background:transparent;
+    font-size:20px;
+}
+
+.badge{
+    position:absolute;
+    right:2px;
+    top:1px;
+    min-width:18px;
+    height:18px;
+    border-radius:99px;
+    padding:1px 5px;
+    display:grid;
+    place-items:center;
+    background:#ff334f;
+    color:#fff;
     font-size:10px;
-    font-weight:900;
+    font-weight:800;
 }
 
-.btn{
-    border:1px solid transparent;
-    border-radius:8px;
-    padding:10px 16px;
-    font-weight:700;
-    transition:.15s;
+.profile-btn{
+    display:flex;
+    align-items:center;
+    gap:9px;
+    border:0;
+    color:#fff;
+    background:transparent;
+    padding:6px 8px;
+    border-radius:10px;
 }
 
-.btn-primary{
-    background:var(--blue);
-    color:white;
+.avatar{
+    width:35px;
+    height:35px;
+    border-radius:50%;
+    background:#fff;
+    color:#0757c9;
+    display:grid;
+    place-items:center;
+    font-weight:800;
 }
 
-.btn-primary:hover{
-    background:var(--blue2);
-}
-
-.btn-outline{
-    background:white;
-    border-color:#dbe1ea;
+.profile-menu{
+    position:absolute;
+    right:16px;
+    top:58px;
+    width:225px;
+    background:#fff;
     color:var(--text);
-}
-
-.btn-light{
-    background:#edf4ff;
-    color:var(--blue);
-}
-
-.btn-danger{
-    background:#fff0f0;
-    color:var(--red);
-    border-color:#ffd5d5;
-}
-
-.btn-small{
-    padding:7px 11px;
-    font-size:12px;
-}
-
-.full{
-    width:100%;
-}
-
-.field,
-.select{
-    width:100%;
-    border:1px solid #dce2ea;
-    border-radius:8px;
-    background:white;
-    padding:11px 12px;
-    outline:none;
-    color:var(--text);
-}
-
-.field:focus,
-.select:focus,
-textarea:focus{
-    border-color:var(--blue);
-    box-shadow:0 0 0 3px rgba(20,107,232,.08);
-}
-
-textarea{
-    width:100%;
-    border:1px solid #dce2ea;
-    border-radius:8px;
-    padding:11px;
-    min-height:110px;
-    resize:vertical;
-    outline:none;
-}
-
-.muted{
-    color:var(--muted);
-    font-size:12px;
-}
-
-.link{
-    color:var(--blue);
-    font-weight:700;
-}
-
-.empty{
-    background:white;
     border:1px solid var(--line);
-    border-radius:12px;
-    padding:40px 20px;
-    text-align:center;
+    border-radius:14px;
+    box-shadow:var(--shadow);
+    overflow:hidden;
+}
+
+.profile-head{
+    padding:15px;
+    border-bottom:1px solid var(--line);
+}
+
+.profile-head strong{
+    display:block;
+}
+
+.profile-head small{
     color:var(--muted);
 }
 
-.msg{
+.profile-item{
+    width:100%;
+    border:0;
+    background:#fff;
+    text-align:left;
+    padding:12px 15px;
+}
+
+.profile-item:hover{
+    background:#f3f7ff;
+}
+
+.drawer-backdrop{
+    position:fixed;
+    inset:0;
+    z-index:1090;
+    background:rgba(0,0,0,.42);
     display:none;
-    margin:10px 0;
-    padding:10px;
-    border-radius:7px;
-    font-size:12px;
 }
 
-.msg.ok{
+.drawer-backdrop.show{
     display:block;
-    background:#eaf8f1;
-    color:var(--green);
 }
 
-.msg.error{
-    display:block;
-    background:#fff0f0;
-    color:var(--red);
+.side-drawer{
+    position:fixed;
+    z-index:1100;
+    top:0;
+    left:-320px;
+    width:300px;
+    height:100dvh;
+    background:#fff;
+    box-shadow:8px 0 30px rgba(0,0,0,.18);
+    transition:left .22s ease;
+    overflow-y:auto;
 }
 
+.side-drawer.open{
+    left:0;
+}
 
-/* =====================================================
-   PUBLIC HEADER
-===================================================== */
-
-.public-header{
-    height:66px;
-    background:white;
-    border-bottom:1px solid var(--line);
+.drawer-top{
+    min-height:66px;
+    padding:0 18px;
+    color:#fff;
+    background:linear-gradient(90deg,#064db8,#0a66d8);
     display:flex;
     align-items:center;
     justify-content:space-between;
-    padding:0 30px;
-    position:sticky;
-    top:0;
-    z-index:100;
 }
 
-.public-nav{
+.drawer-top strong{
+    font-size:19px;
+}
+
+.drawer-close{
+    border:0;
+    background:transparent;
+    color:#fff;
+    font-size:25px;
+}
+
+.drawer-user{
+    padding:18px;
     display:flex;
-    gap:24px;
-    font-size:12px;
-    color:#4d596a;
+    gap:12px;
+    align-items:center;
+    background:#f5f8ff;
+    border-bottom:1px solid var(--line);
 }
 
-.public-nav a:hover{
-    color:var(--blue);
+.drawer-user .avatar{
+    background:var(--blue);
+    color:#fff;
 }
 
-.header-actions{
+.drawer-nav{
+    padding:12px;
+}
+
+.nav-item{
+    width:100%;
     display:flex;
-    gap:8px;
+    align-items:center;
+    gap:13px;
+    padding:12px 13px;
+    margin-bottom:4px;
+    border:0;
+    background:#fff;
+    color:#1f2b3c;
+    text-align:left;
+    border-radius:10px;
 }
 
+.nav-item:hover,
+.nav-item.active{
+    background:#e9f2ff;
+    color:#064db8;
+}
 
-/* =====================================================
-   HOME
-===================================================== */
+.nav-icon{
+    width:23px;
+    text-align:center;
+    font-size:18px;
+}
+
+.page{
+    max-width:1500px;
+    margin:auto;
+    padding:22px;
+}
 
 .hero{
-    max-width:1200px;
-    margin:auto;
-    padding:55px 30px 25px;
-    display:grid;
-    grid-template-columns:1.05fr .95fr;
-    gap:35px;
-    align-items:center;
+    border-radius:22px;
+    background:linear-gradient(125deg,#064db8,#0a70e8);
+    color:#fff;
+    padding:38px;
+    box-shadow:var(--shadow);
 }
 
 .hero h1{
-    margin:0 0 16px;
-    font-size:44px;
-    line-height:1.08;
-    letter-spacing:-1.4px;
+    margin:0 0 8px;
+    font-size:38px;
 }
 
 .hero p{
-    margin:0;
-    max-width:540px;
-    color:var(--muted);
-    font-size:14px;
-    line-height:1.7;
+    margin:0 0 24px;
+    opacity:.92;
 }
 
-.hero-art{
-    min-height:280px;
-    border-radius:25px;
-    background:
-        linear-gradient(
-            145deg,
-            #eaf2ff,
-            #f9fbff
-        );
-    display:grid;
-    place-items:center;
+.hero-search{
+    max-width:850px;
+    display:flex;
+    background:#fff;
+    border-radius:12px;
     overflow:hidden;
 }
 
-.hero-person{
-    font-size:125px;
-    filter:drop-shadow(
-        0 16px 12px
-        rgba(20,107,232,.12)
-    );
+.hero-search input{
+    flex:1;
+    min-width:0;
+    border:0;
+    outline:0;
+    padding:15px;
 }
 
-.search-box{
-    max-width:1200px;
-    margin:auto;
-    padding:0 30px 20px;
-}
-
-.search-row{
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
-    box-shadow:var(--shadow);
-    padding:10px;
-    display:grid;
-    grid-template-columns:1.6fr .8fr .8fr .5fr;
-    gap:8px;
+.hero-search button{
+    border:0;
+    color:#fff;
+    background:#06449f;
+    padding:0 24px;
+    font-weight:700;
 }
 
 .section{
-    max-width:1200px;
-    margin:auto;
-    padding:12px 30px 24px;
+    margin-top:24px;
 }
 
-.section-title{
+.section-head{
     display:flex;
     justify-content:space-between;
     align-items:center;
-    margin-bottom:12px;
-}
-
-.section-title h2{
-    margin:0;
-    font-size:16px;
-}
-
-.chips{
-    display:flex;
-    gap:8px;
-    flex-wrap:wrap;
-}
-
-.chip{
-    border:1px solid var(--line);
-    background:white;
-    border-radius:20px;
-    padding:8px 12px;
-    font-size:11px;
-    color:#445066;
-}
-
-.chip:hover{
-    border-color:var(--blue);
-    color:var(--blue);
-}
-
-.job-grid{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:14px;
-}
-
-.job-card{
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:16px;
-    box-shadow:0 3px 12px rgba(20,40,70,.03);
-}
-
-.job-head{
-    display:flex;
-    gap:11px;
-}
-
-.company-icon{
-    flex:0 0 40px;
-    width:40px;
-    height:40px;
-    border-radius:9px;
-    background:#edf4ff;
-    color:var(--blue);
-    display:grid;
-    place-items:center;
-    font-weight:900;
-}
-
-.job-title{
-    margin:0 0 4px;
-    font-size:14px;
-}
-
-.company{
-    color:var(--muted);
-    font-size:11px;
-}
-
-.tags{
-    display:flex;
-    gap:5px;
-    flex-wrap:wrap;
-    margin-top:8px;
-}
-
-.tag{
-    background:#f4f6f9;
-    padding:4px 6px;
-    border-radius:4px;
-    color:#5d6878;
-    font-size:9px;
-}
-
-.job-actions{
-    display:flex;
-    justify-content:flex-end;
-    gap:7px;
-    margin-top:13px;
-}
-
-
-/* =====================================================
-   AUTH
-===================================================== */
-
-.auth-page{
-    min-height:calc(100vh - 66px);
-    display:flex;
-    justify-content:center;
-    align-items:center;
-    padding:35px 20px;
-}
-
-.auth-card{
-    width:min(850px,100%);
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
-    box-shadow:var(--shadow);
-    overflow:hidden;
-    display:grid;
-    grid-template-columns:.72fr 1.28fr;
-}
-
-.auth-side{
-    background:
-        linear-gradient(
-            145deg,
-            #eef4ff,
-            #f8fbff
-        );
-    padding:35px;
-    display:flex;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    text-align:center;
-}
-
-.auth-side .big{
-    font-size:95px;
-    margin-bottom:15px;
-}
-
-.auth-side h2{
-    margin:0 0 8px;
-    font-size:21px;
-}
-
-.auth-side p{
-    color:var(--muted);
-    font-size:12px;
-    line-height:1.7;
-}
-
-.auth-form{
-    padding:32px;
-}
-
-.auth-form h1{
-    margin:0 0 6px;
-    font-size:23px;
-}
-
-.sub{
-    color:var(--muted);
-    font-size:11px;
-    margin-bottom:22px;
-}
-
-.form-group{
+    gap:15px;
     margin-bottom:13px;
 }
 
-.form-label{
-    display:block;
-    font-size:11px;
+.section-head h2{
+    margin:0;
+    font-size:23px;
+}
+
+.cards{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:16px;
+}
+
+.card{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    box-shadow:0 4px 15px rgba(20,50,90,.05);
+}
+
+.job-card{
+    padding:18px;
+}
+
+.job-card h3{
+    margin:0 0 7px;
+    color:#0757c9;
+    font-size:19px;
+}
+
+.company{
+    font-weight:700;
+    margin-bottom:9px;
+}
+
+.meta{
+    color:var(--muted);
+    font-size:13px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:7px;
+    margin:9px 0;
+}
+
+.tag{
+    display:inline-flex;
+    align-items:center;
+    border-radius:99px;
+    background:#eef4ff;
+    color:#164d98;
+    padding:5px 9px;
+    font-size:12px;
+    font-weight:700;
+}
+
+.salary{
     font-weight:800;
-    margin-bottom:6px;
+    margin:10px 0;
+}
+
+.card-actions{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    margin-top:13px;
+}
+
+.btn{
+    border:0;
+    border-radius:9px;
+    padding:10px 14px;
+    font-weight:700;
+}
+
+.btn-primary{
+    color:#fff;
+    background:var(--blue);
+}
+
+.btn-primary:hover{
+    background:#0446a5;
+}
+
+.btn-secondary{
+    color:#0a4da7;
+    background:#eaf2ff;
+}
+
+.btn-danger{
+    color:#fff;
+    background:var(--danger);
+}
+
+.btn-success{
+    color:#fff;
+    background:var(--success);
+}
+
+.btn-outline{
+    color:#184c8e;
+    background:#fff;
+    border:1px solid #bfd0e8;
+}
+
+.btn:disabled{
+    opacity:.55;
+    cursor:not-allowed;
+}
+
+.filters{
+    display:grid;
+    grid-template-columns:2fr repeat(4,1fr) auto;
+    gap:9px;
+    margin-bottom:17px;
+}
+
+.field,
+.textarea{
+    width:100%;
+    border:1px solid #ccd7e7;
+    border-radius:9px;
+    background:#fff;
+    outline:none;
+    padding:11px 12px;
+}
+
+.field:focus,
+.textarea:focus{
+    border-color:#0a66d8;
+    box-shadow:0 0 0 3px rgba(10,102,216,.09);
+}
+
+.textarea{
+    min-height:120px;
+    resize:vertical;
+}
+
+.form-card{
+    max-width:850px;
+    padding:22px;
+    margin:auto;
 }
 
 .form-grid{
     display:grid;
     grid-template-columns:1fr 1fr;
-    gap:12px;
+    gap:14px;
 }
 
-.check{
-    display:flex;
-    align-items:center;
-    gap:7px;
-    font-size:11px;
-    color:#5e6979;
-    margin:10px 0;
-}
-
-
-/* =====================================================
-   DASHBOARD
-===================================================== */
-
-.shell{
-    min-height:100vh;
-}
-
-.sidebar{
-    position:fixed;
-    left:0;
-    top:0;
-    bottom:0;
-    width:220px;
-    background:var(--navy);
-    color:white;
-    padding:20px 13px;
-    z-index:200;
+.form-group{
     display:flex;
     flex-direction:column;
+    gap:7px;
 }
 
-.sidebar .brand{
-    color:white;
-    padding:0 9px 25px;
+.form-group.full{
+    grid-column:1/-1;
 }
 
-.sidebar .brand-mark{
-    background:#1975f1;
-}
-
-.side-label{
-    color:#8da5bc;
-    font-size:9px;
-    text-transform:uppercase;
-    letter-spacing:1px;
-    padding:0 11px 8px;
-}
-
-.side-btn{
-    width:100%;
-    border:0;
-    background:transparent;
-    color:#c6d5e5;
-    text-align:left;
-    padding:11px 10px;
-    border-radius:7px;
-    margin-bottom:3px;
-    font-size:11px;
-    display:flex;
-    align-items:center;
-    gap:9px;
-}
-
-.side-btn:hover,
-.side-btn.active{
-    background:#1169dc;
-    color:white;
-}
-
-.side-spacer{
-    flex:1;
-}
-
-.shell-main{
-    margin-left:220px;
-    min-height:100vh;
-}
-
-.topbar{
-    height:62px;
-    background:white;
-    border-bottom:1px solid var(--line);
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    padding:0 25px;
-    position:sticky;
-    top:0;
-    z-index:50;
-}
-
-.mobile-menu{
-    display:none;
-    border:0;
-    background:#edf4ff;
-    color:var(--blue);
-    border-radius:8px;
-    padding:8px 11px;
-}
-
-.user-mini{
-    display:flex;
-    align-items:center;
-    gap:8px;
-    font-size:12px;
+.form-group label{
     font-weight:700;
-}
-
-.avatar{
-    width:32px;
-    height:32px;
-    border-radius:50%;
-    background:#e7effc;
-    display:grid;
-    place-items:center;
-    color:var(--blue);
-}
-
-.page{
-    max-width:1250px;
-    margin:auto;
-    padding:25px;
-}
-
-.page-title{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:20px;
-}
-
-.page-title h1{
-    margin:0;
-    font-size:21px;
-}
-
-.page-title p{
-    margin:5px 0 0;
-    color:var(--muted);
-    font-size:11px;
+    font-size:14px;
 }
 
 .stats{
     display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:13px;
-    margin-bottom:20px;
+    grid-template-columns:repeat(4,1fr);
+    gap:14px;
 }
 
 .stat{
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:18px;
+    padding:20px;
 }
 
-.stat .n{
-    font-size:25px;
-    font-weight:800;
+.stat strong{
+    display:block;
+    font-size:30px;
+    color:#0757c9;
 }
 
-.stat .l{
-    font-size:10px;
+.stat span{
     color:var(--muted);
-    margin-top:3px;
-}
-
-.panel{
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:18px;
-    margin-bottom:15px;
-}
-
-.panel h3{
-    margin:0 0 14px;
-    font-size:14px;
 }
 
 .table-wrap{
     overflow:auto;
+    border-radius:var(--radius);
+    border:1px solid var(--line);
+    background:#fff;
 }
 
 table{
     width:100%;
     border-collapse:collapse;
-    font-size:11px;
+    min-width:720px;
 }
 
 th,
 td{
-    padding:11px 8px;
-    border-bottom:1px solid #edf0f4;
+    padding:12px 14px;
+    border-bottom:1px solid var(--line);
     text-align:left;
-    white-space:nowrap;
+    vertical-align:top;
 }
 
 th{
-    color:#667085;
-    font-size:10px;
+    background:#f1f6ff;
+    color:#16457e;
 }
 
 .status{
     display:inline-block;
-    padding:4px 7px;
-    border-radius:5px;
-    background:#eaf8f1;
-    color:var(--green);
-    font-size:10px;
-    font-weight:700;
+    border-radius:99px;
+    padding:5px 9px;
+    font-size:12px;
+    font-weight:800;
+    background:#edf2f7;
 }
 
-.detail-grid{
-    display:grid;
-    grid-template-columns:1fr 280px;
-    gap:15px;
+.status.applied{background:#e9f2ff;color:#1557a8}
+.status.reviewing{background:#fff5d8;color:#8b6100}
+.status.shortlisted{background:#e7f7ed;color:#17753b}
+.status.rejected{background:#fde9ea;color:#b4262f}
+.status.hired{background:#dff7e8;color:#087236}
+.status.active{background:#e5f7eb;color:#087236}
+.status.closed{background:#edf0f3;color:#586270}
+
+.empty{
+    padding:40px 20px;
+    text-align:center;
+    color:var(--muted);
+    background:#fff;
+    border:1px dashed #c8d3e2;
+    border-radius:var(--radius);
 }
 
-.detail-card{
-    background:white;
-    border:1px solid var(--line);
-    border-radius:12px;
+.modal{
+    position:fixed;
+    inset:0;
+    z-index:2000;
+    background:rgba(0,0,0,.5);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:18px;
+}
+
+.modal-box{
+    width:min(760px,100%);
+    max-height:90dvh;
+    overflow:auto;
+    background:#fff;
+    border-radius:18px;
+    box-shadow:var(--shadow);
+}
+
+.modal-head{
+    padding:18px 20px;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+}
+
+.modal-head h3{
+    margin:0;
+}
+
+.modal-close{
+    border:0;
+    background:transparent;
+    font-size:24px;
+}
+
+.modal-body{
     padding:20px;
 }
 
-.detail-card h1{
-    font-size:24px;
-    margin:0 0 5px;
+.toast{
+    position:fixed;
+    z-index:3000;
+    right:18px;
+    bottom:18px;
+    max-width:360px;
+    padding:13px 16px;
+    color:#fff;
+    background:#16263d;
+    border-radius:10px;
+    box-shadow:var(--shadow);
 }
 
-.detail-card h2{
-    font-size:14px;
-    margin:20px 0 8px;
+.toast.error{
+    background:#a9212a;
 }
 
-.detail-card p{
-    font-size:12px;
-    color:#4f5b6c;
-    line-height:1.8;
-    white-space:pre-line;
-}
-
-.action-stack{
-    display:grid;
-    gap:8px;
-}
-
-.form-panel{
-    max-width:900px;
-}
-
-.form-row{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:12px;
-}
-
-.form-field{
-    margin-bottom:13px;
-}
-
-.form-field label{
-    display:block;
-    font-size:11px;
-    font-weight:800;
-    margin-bottom:6px;
-}
-
-.profile-grid{
-    display:grid;
-    grid-template-columns:260px 1fr;
-    gap:15px;
-}
-
-.profile-box{
+.loading{
+    padding:25px;
     text-align:center;
+    color:var(--muted);
 }
 
-.profile-avatar{
-    width:92px;
-    height:92px;
-    margin:5px auto 15px;
-    border-radius:50%;
-    background:#e9f1ff;
-    color:var(--blue);
-    display:grid;
-    place-items:center;
-    font-size:30px;
-    font-weight:800;
+.footer{
+    padding:35px 20px;
+    text-align:center;
+    color:var(--muted);
 }
 
 .mobile-bottom{
     display:none;
 }
 
+@media(max-width:1100px){
+    .cards{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
 
-/* =====================================================
-   MOBILE
-===================================================== */
+    .filters{
+        grid-template-columns:repeat(2,1fr);
+    }
 
-@media(max-width:900px){
+    .filters input{
+        grid-column:1/-1;
+    }
+}
 
-    .public-nav{
+@media(max-width:760px){
+    .app-header{
+        height:58px;
+    }
+
+    .header-inner{
+        padding:0 10px;
+        gap:7px;
+    }
+
+    .logo{
+        font-size:17px;
+    }
+
+    .header-search{
         display:none;
     }
 
+    .header-links{
+        gap:0;
+    }
+
+    .header-link{
+        display:none;
+    }
+
+    .profile-btn span:not(.avatar){
+        display:none;
+    }
+
+    .page{
+        padding:13px 10px 80px;
+    }
+
     .hero{
+        padding:25px 18px;
+        border-radius:16px;
+    }
+
+    .hero h1{
+        font-size:28px;
+    }
+
+    .hero-search button{
+        padding:0 16px;
+    }
+
+    .cards{
         grid-template-columns:1fr;
     }
 
-    .hero-art{
-        min-height:190px;
+    .form-grid{
+        grid-template-columns:1fr;
     }
 
-    .search-row{
+    .form-group.full{
+        grid-column:auto;
+    }
+
+    .stats{
         grid-template-columns:1fr 1fr;
     }
 
-    .job-grid{
-        grid-template-columns:1fr 1fr;
+    .filters{
+        grid-template-columns:1fr;
     }
 
-    .sidebar{
-        transform:translateX(-100%);
-        transition:.2s;
+    .filters input{
+        grid-column:auto;
     }
 
-    .sidebar.open{
-        transform:translateX(0);
-    }
-
-    .shell-main{
-        margin-left:0;
-    }
-
-    .mobile-menu{
-        display:block;
+    .side-drawer{
+        width:min(310px,88vw);
     }
 
     .mobile-bottom{
-        display:grid;
         position:fixed;
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
         left:0;
         right:0;
         bottom:0;
-        height:62px;
-        background:white;
+        z-index:900;
+        background:#fff;
         border-top:1px solid var(--line);
-        z-index:250;
-        grid-template-columns:repeat(5,1fr);
+        box-shadow:0 -4px 16px rgba(0,0,0,.08);
     }
 
     .mobile-bottom button{
         border:0;
-        background:white;
-        color:#5d6878;
-        font-size:9px;
+        background:#fff;
+        padding:8px 3px;
+        color:#44536a;
+        font-size:11px;
     }
 
-    .mobile-bottom button.active{
-        color:var(--blue);
-        font-weight:800;
+    .mobile-bottom button strong{
+        display:block;
+        font-size:18px;
     }
-
-    .page{
-        padding-bottom:85px;
-    }
-
 }
 
-@media(max-width:620px){
-
-    .public-header{
-        height:60px;
-        padding:0 14px;
+@media(min-width:761px){
+    .side-drawer{
+        top:66px;
+        height:calc(100dvh - 66px);
     }
-
-    .header-actions .btn{
-        padding:8px 10px;
-        font-size:10px;
-    }
-
-    .hero{
-        padding:30px 16px 15px;
-    }
-
-    .hero h1{
-        font-size:32px;
-    }
-
-    .hero-art{
-        display:none;
-    }
-
-    .search-box{
-        padding:0 16px 15px;
-    }
-
-    .search-row{
-        grid-template-columns:1fr;
-    }
-
-    .section{
-        padding:10px 16px 20px;
-    }
-
-    .job-grid{
-        grid-template-columns:1fr;
-    }
-
-    .auth-page{
-        padding:15px;
-    }
-
-    .auth-card{
-        grid-template-columns:1fr;
-    }
-
-    .auth-side{
-        display:none;
-    }
-
-    .auth-form{
-        padding:25px 20px;
-    }
-
-    .form-grid,
-    .form-row{
-        grid-template-columns:1fr;
-    }
-
-    .stats{
-        grid-template-columns:1fr;
-    }
-
-    .topbar{
-        padding:0 14px;
-    }
-
-    .topbar .user-mini span{
-        display:none;
-    }
-
-    .detail-grid,
-    .profile-grid{
-        grid-template-columns:1fr;
-    }
-
-    .page{
-        padding:18px 14px 85px;
-    }
-
 }
-
 </style>
 </head>
 
-
 <body>
 
-<div id="app"></div>
+<header class="app-header">
+    <div class="header-inner">
 
+        <button class="menu-btn" onclick="toggleDrawer()" aria-label="Menu">
+            ☰
+        </button>
+
+        <button
+            class="logo"
+            style="border:0;background:transparent;color:#fff"
+            onclick="go('home')">
+            JOB MART
+        </button>
+
+        <div class="header-search">
+            <input
+                id="topSearch"
+                placeholder="Search jobs, skills, companies..."
+                onkeydown="if(event.key==='Enter') searchFromHeader()">
+            <button onclick="searchFromHeader()">⌕</button>
+        </div>
+
+        <div class="header-links">
+            <button class="header-link" onclick="go('jobs')">Jobs</button>
+            <button class="header-link" onclick="go('jobs')">Employers</button>
+            <button class="header-link" onclick="go('jobs')">Categories</button>
+
+            <button class="icon-btn" onclick="go('notifications')" aria-label="Notifications">
+                🔔
+                <span id="notificationBadge" class="badge hidden">0</span>
+            </button>
+
+            <button class="profile-btn" onclick="toggleProfileMenu()">
+                <span id="headerAvatar" class="avatar">?</span>
+                <span id="headerName">Guest</span>
+                <span>⌄</span>
+            </button>
+        </div>
+
+        <div id="profileMenu" class="profile-menu hidden">
+            <div class="profile-head">
+                <strong id="profileMenuName">Guest</strong>
+                <small id="profileMenuEmail">Not logged in</small>
+            </div>
+            <button class="profile-item" onclick="go('profile')">👤 My Profile</button>
+            <button class="profile-item" onclick="go('settings')">⚙️ Settings</button>
+            <button class="profile-item" onclick="go('password')">🔒 Change Password</button>
+            <button class="profile-item" onclick="logout()">⏻ Logout</button>
+        </div>
+
+    </div>
+</header>
+
+<div id="drawerBackdrop" class="drawer-backdrop" onclick="closeDrawer()"></div>
+
+<aside id="sideDrawer" class="side-drawer">
+    <div class="drawer-top">
+        <strong>JOB MART</strong>
+        <button class="drawer-close" onclick="closeDrawer()">×</button>
+    </div>
+
+    <div class="drawer-user">
+        <span id="drawerAvatar" class="avatar">?</span>
+        <div>
+            <strong id="drawerName">Guest</strong>
+            <div id="drawerRole" style="font-size:12px;color:#68758a">Not logged in</div>
+        </div>
+    </div>
+
+    <nav class="drawer-nav">
+        <button class="nav-item" data-page="home" onclick="go('home')">
+            <span class="nav-icon">⌂</span> Dashboard
+        </button>
+
+        <button class="nav-item" data-page="jobs" onclick="go('jobs')">
+            <span class="nav-icon">⌕</span> Browse Jobs
+        </button>
+
+        <button class="nav-item" data-page="applications" onclick="go('applications')">
+            <span class="nav-icon">▤</span> My Applications
+        </button>
+
+        <button class="nav-item" data-page="saved" onclick="go('saved')">
+            <span class="nav-icon">♡</span> Saved Jobs
+        </button>
+
+        <button id="postJobNav" class="nav-item hidden" data-page="post-job" onclick="go('post-job')">
+            <span class="nav-icon">⊞</span> Post a Job
+        </button>
+
+        <button id="myJobsNav" class="nav-item hidden" data-page="my-jobs" onclick="go('my-jobs')">
+            <span class="nav-icon">▣</span> My Jobs
+        </button>
+
+        <button class="nav-item" data-page="profile" onclick="go('profile')">
+            <span class="nav-icon">♙</span> Profile
+        </button>
+
+        <button class="nav-item" data-page="notifications" onclick="go('notifications')">
+            <span class="nav-icon">♧</span> Notifications
+        </button>
+
+        <button class="nav-item" onclick="logout()">
+            <span class="nav-icon">⏻</span> Logout
+        </button>
+    </nav>
+</aside>
+
+<main id="app" class="page"></main>
+
+<nav class="mobile-bottom">
+    <button onclick="go('home')"><strong>⌂</strong>Home</button>
+    <button onclick="go('jobs')"><strong>⌕</strong>Jobs</button>
+    <button onclick="go('applications')"><strong>▤</strong>Applications</button>
+    <button onclick="go('profile')"><strong>♙</strong>Profile</button>
+</nav>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
 
 <script>
+const state = {
+    user: null,
+    page: "home",
+    jobs: [],
+    editingJobId: null
+};
 
-const app = document.getElementById("app");
 
-let me = null;
-
-let jobsCache = [];
-
-
-function esc(value){
-
+function escapeHtml(value){
     return String(value ?? "")
-        .replace(/[&<>"']/g, function(c){
-
-            return {
-                "&":"&amp;",
-                "<":"&lt;",
-                ">":"&gt;",
-                '"':"&quot;",
-                "'":"&#39;"
-            }[c];
-
-        });
-
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
 }
 
 
 function initials(name){
-
-    const parts =
-        String(name || "User")
-        .trim()
-        .split(/\s+/);
-
-    return (
-        (parts[0]?.[0] || "U") +
-        (parts[1]?.[0] || "")
-    ).toUpperCase();
-
+    const text = String(name || "?").trim();
+    if(!text) return "?";
+    return text
+        .split(/\s+/)
+        .slice(0,2)
+        .map(x => x[0])
+        .join("")
+        .toUpperCase();
 }
 
 
-function fmtDate(value){
+function toast(message, error=false){
+    const root = document.getElementById("toastRoot");
+    root.innerHTML =
+        `<div class="toast ${error ? "error" : ""}">
+            ${escapeHtml(message)}
+         </div>`;
 
-    if(!value) return "";
-
-    const date = new Date(value);
-
-    if(Number.isNaN(date.getTime()))
-        return "";
-
-    return date.toLocaleDateString(
-        undefined,
-        {
-            day:"2-digit",
-            month:"short",
-            year:"numeric"
-        }
-    );
-
+    setTimeout(() => {
+        root.innerHTML = "";
+    }, 2800);
 }
 
 
 async function api(url, options={}){
+    const config = {
+        credentials: "same-origin",
+        ...options
+    };
 
-    const opts = {
-        ...options,
-        headers:{
-            ...(options.headers || {})
-        }
+    config.headers = {
+        ...(options.headers || {})
     };
 
     if(
-        opts.body &&
-        typeof opts.body !== "string"
+        config.body &&
+        typeof config.body === "object" &&
+        !(config.body instanceof FormData)
     ){
-
-        opts.headers["Content-Type"] =
-            "application/json";
-
-        opts.body =
-            JSON.stringify(opts.body);
-
+        config.headers["Content-Type"] = "application/json";
+        config.body = JSON.stringify(config.body);
     }
 
-    const response =
-        await fetch(url, opts);
+    const response = await fetch(url, config);
 
     let data = {};
-
     try{
         data = await response.json();
-    }catch(e){}
+    }catch(e){
+        data = {};
+    }
 
     if(!response.ok){
-
         throw new Error(
             data.detail ||
-            "Something went wrong"
+            data.message ||
+            `Request failed (${response.status})`
         );
-
     }
 
     return data;
-
 }
 
 
-/* =====================================================
-   PUBLIC HEADER
-===================================================== */
-
-function publicHeader(){
-
-    return `
-
-    <header class="public-header">
-
-        <div class="brand">
-            <span class="brand-mark">JM</span>
-            Job Mart
-        </div>
-
-        <nav class="public-nav">
-
-            <a href="#"
-               onclick="showHome();return false">
-               Home
-            </a>
-
-            <a href="#"
-               onclick="showJobs();return false">
-               Jobs
-            </a>
-
-            <a href="#"
-               onclick="showHome();return false">
-               Employers
-            </a>
-
-            <a href="#"
-               onclick="showHome();return false">
-               About Us
-            </a>
-
-            <a href="#"
-               onclick="showHome();return false">
-               Contact
-            </a>
-
-        </nav>
-
-        <div class="header-actions">
-
-            <button
-                class="btn btn-outline btn-small"
-                onclick="showLogin()">
-                Login
-            </button>
-
-            <button
-                class="btn btn-primary btn-small"
-                onclick="showRegister()">
-                Register
-            </button>
-
-        </div>
-
-    </header>
-
-    `;
-
+function toggleDrawer(){
+    document.getElementById("sideDrawer").classList.toggle("open");
+    document.getElementById("drawerBackdrop").classList.toggle("show");
 }
 
 
-/* =====================================================
-   HOME
-===================================================== */
+function closeDrawer(){
+    document.getElementById("sideDrawer").classList.remove("open");
+    document.getElementById("drawerBackdrop").classList.remove("show");
+}
 
-function showHome(){
 
-    if(me){
-        showDashboard();
-        return;
+function toggleProfileMenu(){
+    document.getElementById("profileMenu").classList.toggle("hidden");
+}
+
+
+document.addEventListener("click", (event) => {
+    const menu = document.getElementById("profileMenu");
+    const button = event.target.closest(".profile-btn");
+
+    if(!button && !event.target.closest("#profileMenu")){
+        menu.classList.add("hidden");
     }
+});
 
-    renderPublicHome();
 
+function updateHeader(){
+    const user = state.user;
+
+    const name = user ? user.name : "Guest";
+    const email = user ? user.email : "Not logged in";
+    const role = user ? user.role : "Not logged in";
+
+    document.getElementById("headerName").textContent =
+        user ? user.name : "Guest";
+
+    document.getElementById("headerAvatar").textContent =
+        user ? initials(user.name) : "?";
+
+    document.getElementById("profileMenuName").textContent = name;
+    document.getElementById("profileMenuEmail").textContent = email;
+
+    document.getElementById("drawerName").textContent = name;
+    document.getElementById("drawerRole").textContent = role;
+    document.getElementById("drawerAvatar").textContent =
+        user ? initials(user.name) : "?";
+
+    const employer = user &&
+        (user.role === "employer" || user.role === "admin");
+
+    document.getElementById("postJobNav")
+        .classList.toggle("hidden", !employer);
+
+    document.getElementById("myJobsNav")
+        .classList.toggle("hidden", !employer);
 }
 
 
-function renderPublicHome(){
-
-    app.innerHTML = `
-
-    ${publicHeader()}
-
-    <main>
-
-        <section class="hero">
-
-            <div>
-
-                <h1>
-                    Find The Job<br>
-                    That Fits Your Life
-                </h1>
-
-                <p>
-                    Search jobs posted by verified
-                    employers and build your career.
-                </p>
-
-            </div>
-
-            <div class="hero-art">
-
-                <div class="hero-person">
-                    🧑‍💻
-                </div>
-
-            </div>
-
-        </section>
-
-
-        <section class="search-box">
-
-            <div class="search-row">
-
-                <input
-                    id="homeQ"
-                    class="field"
-                    placeholder="Job title, keyword, or company"
-                >
-
-                <select
-                    id="homeCountry"
-                    class="select"
-                >
-
-                    <option value="">
-                        All Countries
-                    </option>
-
-                    <option>India</option>
-                    <option>USA</option>
-                    <option>UAE</option>
-                    <option>UK</option>
-                    <option>Other</option>
-
-                </select>
-
-
-                <select
-                    id="homeType"
-                    class="select"
-                >
-
-                    <option value="">
-                        All Job Types
-                    </option>
-
-                    <option>Full-time</option>
-                    <option>Part-time</option>
-                    <option>Contract</option>
-                    <option>Freelance</option>
-
-                </select>
-
-
-                <button
-                    class="btn btn-primary"
-                    onclick="homeSearch()">
-                    Search
-                </button>
-
-            </div>
-
-        </section>
-
-
-        <section class="section">
-
-            <div class="section-title">
-
-                <h2>
-                    Popular Categories
-                </h2>
-
-                <a
-                    class="link"
-                    href="#"
-                    onclick="showJobs();return false">
-                    View all
-                </a>
-
-            </div>
-
-
-            <div class="chips">
-
-                ${
-                    [
-                        "IT & Software",
-                        "Design",
-                        "Marketing",
-                        "Sales",
-                        "Finance",
-                        "HR",
-                        "Customer Support",
-                        "Engineering"
-                    ].map(function(category){
-
-                        return `
-                        <button
-                            class="chip"
-                            onclick="categorySearch('${category}')">
-                            ${esc(category)}
-                        </button>
-                        `;
-
-                    }).join("")
-                }
-
-            </div>
-
-        </section>
-
-
-        <section class="section">
-
-            <div class="section-title">
-
-                <h2>
-                    Latest Jobs
-                </h2>
-
-                <a
-                    class="link"
-                    href="#"
-                    onclick="showJobs();return false">
-                    View all
-                </a>
-
-            </div>
-
-            <div
-                id="publicJobs"
-                class="job-grid">
-            </div>
-
-        </section>
-
-    </main>
-
-    `;
-
-    loadPublicJobs();
-
-}
-
-
-function homeSearch(){
-
-    const q =
-        document.getElementById(
-            "homeQ"
-        ).value.trim();
-
-    const country =
-        document.getElementById(
-            "homeCountry"
-        ).value;
-
-    const type =
-        document.getElementById(
-            "homeType"
-        ).value;
-
-    showJobs({
-        q,
-        country,
-        job_type:type
-    });
-
-}
-
-
-function categorySearch(category){
-
-    showJobs({
-        category
-    });
-
-}
-
-
-async function loadPublicJobs(params={}){
-
-    const box =
-        document.getElementById(
-            "publicJobs"
-        );
-
-    if(!box) return;
-
-    box.innerHTML =
-        `<div class="empty">Loading jobs...</div>`;
-
-    try{
-
-        const query =
-            new URLSearchParams(params)
-                .toString();
-
-        const data =
-            await api(
-                "/api/jobs" +
-                (query ? "?" + query : "")
-            );
-
-        jobsCache =
-            data.jobs || [];
-
-        box.innerHTML =
-            jobsCache.length
-            ?
-            jobsCache
-                .slice(0,6)
-                .map(jobCard)
-                .join("")
-            :
-            `
-            <div
-                class="empty"
-                style="grid-column:1/-1">
-
-                No jobs posted yet.
-
-                <br>
-
-                <small>
-                    Jobs will appear here
-                    after an employer posts them.
-                </small>
-
-            </div>
-            `;
-
-    }catch(error){
-
-        box.innerHTML =
-            `<div class="empty">
-                ${esc(error.message)}
-            </div>`;
-
-    }
-
-}
-
-
-function jobCard(job){
-
-    return `
-
-    <article class="job-card">
-
-        <div class="job-head">
-
-            <div class="company-icon">
-                ▣
-            </div>
-
-            <div style="min-width:0;flex:1">
-
-                <h3 class="job-title">
-                    ${esc(job.title)}
-                </h3>
-
-                <div class="company">
-                    ${esc(job.company)}
-                </div>
-
-                <div class="tags">
-
-                    <span class="tag">
-                        ${esc(job.country)}
-                    </span>
-
-                    <span class="tag">
-                        ${esc(job.job_type)}
-                    </span>
-
-                    <span class="tag">
-                        ${esc(job.work_mode)}
-                    </span>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <div
-            class="muted"
-            style="margin-top:10px">
-
-            ${esc(
-                job.location ||
-                job.country
-            )}
-
-            ${
-                job.salary
-                ?
-                " · " + esc(job.salary)
-                :
-                ""
-            }
-
-        </div>
-
-
-        <div class="job-actions">
-
-            <button
-                class="btn btn-outline btn-small"
-                onclick="showJob(${job.id})">
-
-                View Job
-
-            </button>
-
-        </div>
-
-    </article>
-
-    `;
-
-}
-
-
-/* =====================================================
-   LOGIN
-===================================================== */
-
-function showLogin(){
-
-    app.innerHTML = `
-
-    ${publicHeader()}
-
-    <main class="auth-page">
-
-        <div class="auth-card">
-
-            <aside class="auth-side">
-
-                <div class="big">
-                    🔐
-                </div>
-
-                <h2>
-                    Welcome Back!
-                </h2>
-
-                <p>
-                    Login to your account
-                    <br>
-                    and explore thousands of jobs.
-                </p>
-
-            </aside>
-
-
-            <section class="auth-form">
-
-                <h1>
-                    Welcome Back!
-                </h1>
-
-                <div class="sub">
-                    Login to your account
-                    and explore thousands of jobs.
-                </div>
-
-
-                <div class="form-group">
-
-                    <label class="form-label">
-                        Email
-                    </label>
-
-                    <input
-                        id="loginEmail"
-                        class="field"
-                        type="email"
-                        placeholder="you@example.com"
-                    >
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label class="form-label">
-                        Password
-                    </label>
-
-                    <input
-                        id="loginPassword"
-                        class="field"
-                        type="password"
-                        placeholder="Your password"
-                    >
-
-                </div>
-
-
-                <label class="check">
-
-                    <input
-                        id="remember"
-                        type="checkbox"
-                    >
-
-                    Remember me
-
-                </label>
-
-
-                <div
-                    id="loginMsg"
-                    class="msg">
-                </div>
-
-
-                <button
-                    class="btn btn-primary full"
-                    onclick="doLogin()">
-
-                    Login
-
-                </button>
-
-
-                <p
-                    class="muted"
-                    style="text-align:center">
-
-                    Don't have an account?
-
-                    <a
-                        class="link"
-                        href="#"
-                        onclick="showRegister();return false">
-
-                        Register
-
-                    </a>
-
-                </p>
-
-            </section>
-
-        </div>
-
-    </main>
-
-    `;
-
-}
-
-
-async function doLogin(){
-
-    const msg =
-        document.getElementById(
-            "loginMsg"
-        );
-
-    msg.className = "msg";
-    msg.textContent = "";
-
-    try{
-
-        const data =
-            await api(
-                "/api/login",
-                {
-                    method:"POST",
-                    body:{
-                        email:
-                            document
-                            .getElementById(
-                                "loginEmail"
-                            )
-                            .value
-                            .trim(),
-
-                        password:
-                            document
-                            .getElementById(
-                                "loginPassword"
-                            )
-                            .value
-                    }
-                }
-            );
-
-        me = data.user;
-
-        showDashboard();
-
-    }catch(error){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            error.message;
-
-    }
-
-}
-
-
-/* =====================================================
-   REGISTER
-===================================================== */
-
-function showRegister(){
-
-    app.innerHTML = `
-
-    ${publicHeader()}
-
-    <main class="auth-page">
-
-        <div class="auth-card">
-
-            <aside class="auth-side">
-
-                <div class="big">
-                    👩‍💼
-                </div>
-
-                <h2>
-                    Join Job Mart
-                </h2>
-
-                <p>
-                    Join thousands of job seekers
-                    <br>
-                    and employers today.
-                </p>
-
-            </aside>
-
-
-            <section class="auth-form">
-
-                <h1>
-                    Create your Account
-                </h1>
-
-                <div class="sub">
-                    Join thousands of job seekers
-                    and employers today!
-                </div>
-
-
-                <div class="form-grid">
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Full Name
-                        </label>
-
-                        <input
-                            id="regName"
-                            class="field"
-                            placeholder="Your name"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Email
-                        </label>
-
-                        <input
-                            id="regEmail"
-                            class="field"
-                            type="email"
-                            placeholder="you@example.com"
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-grid">
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Password
-                        </label>
-
-                        <input
-                            id="regPassword"
-                            class="field"
-                            type="password"
-                            placeholder="Minimum 6 characters"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Confirm Password
-                        </label>
-
-                        <input
-                            id="regConfirm"
-                            class="field"
-                            type="password"
-                            placeholder="Repeat password"
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label class="form-label">
-                        Account Type
-                    </label>
-
-                    <select
-                        id="regRole"
-                        class="select">
-
-                        <option value="jobseeker">
-                            Job Seeker
-                        </option>
-
-                        <option value="employer">
-                            Employer / Recruiter
-                        </option>
-
-                    </select>
-
-                </div>
-
-
-                <div class="form-grid">
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Phone
-                        </label>
-
-                        <input
-                            id="regPhone"
-                            class="field"
-                            placeholder="Phone number"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label class="form-label">
-                            Country
-                        </label>
-
-                        <input
-                            id="regCountry"
-                            class="field"
-                            value="India"
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-group">
-
-                    <label class="form-label">
-                        City
-                    </label>
-
-                    <input
-                        id="regCity"
-                        class="field"
-                        placeholder="City"
-                    >
-
-                </div>
-
-
-                <label class="check">
-
-                    <input
-                        id="terms"
-                        type="checkbox"
-                    >
-
-                    I agree to the Terms & Conditions
-
-                </label>
-
-
-                <div
-                    id="regMsg"
-                    class="msg">
-                </div>
-
-
-                <button
-                    class="btn btn-primary full"
-                    onclick="doRegister()">
-
-                    Register
-
-                </button>
-
-
-                <p
-                    class="muted"
-                    style="text-align:center">
-
-                    Already have an account?
-
-                    <a
-                        class="link"
-                        href="#"
-                        onclick="showLogin();return false">
-
-                        Login
-
-                    </a>
-
-                </p>
-
-            </section>
-
-        </div>
-
-    </main>
-
-    `;
-
-}
-
-
-async function doRegister(){
-
-    const msg =
-        document.getElementById(
-            "regMsg"
-        );
-
-    msg.className = "msg";
-    msg.textContent = "";
-
-    const password =
-        document.getElementById(
-            "regPassword"
-        ).value;
-
-    const confirm =
-        document.getElementById(
-            "regConfirm"
-        ).value;
-
-    if(password !== confirm){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            "Passwords do not match";
-
-        return;
-    }
-
-    if(password.length < 6){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            "Password must be at least 6 characters";
-
-        return;
-    }
-
-    if(
-        !document.getElementById(
-            "terms"
-        ).checked
-    ){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            "Please accept the Terms & Conditions";
-
-        return;
-    }
-
-    try{
-
-        await api(
-            "/api/register",
-            {
-                method:"POST",
-                body:{
-                    name:
-                        document
-                        .getElementById(
-                            "regName"
-                        )
-                        .value
-                        .trim(),
-
-                    email:
-                        document
-                        .getElementById(
-                            "regEmail"
-                        )
-                        .value
-                        .trim(),
-
-                    password,
-
-                    role:
-                        document
-                        .getElementById(
-                            "regRole"
-                        )
-                        .value,
-
-                    phone:
-                        document
-                        .getElementById(
-                            "regPhone"
-                        )
-                        .value
-                        .trim(),
-
-                    country:
-                        document
-                        .getElementById(
-                            "regCountry"
-                        )
-                        .value
-                        .trim(),
-
-                    city:
-                        document
-                        .getElementById(
-                            "regCity"
-                        )
-                        .value
-                        .trim()
-                }
-            }
-        );
-
-        msg.className =
-            "msg ok";
-
-        msg.textContent =
-            "Account created. Opening login...";
-
-        setTimeout(
-            showLogin,
-            700
-        );
-
-    }catch(error){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            error.message;
-
-    }
-
-}
-
-
-/* =====================================================
-   SIDEBAR
-===================================================== */
-
-function sidebar(){
-
-    const employer =
-        me &&
-        (
-            me.role === "employer" ||
-            me.role === "admin"
-        );
-
-    return `
-
-    <aside
-        id="sidebar"
-        class="sidebar">
-
-        <div class="brand">
-
-            <span class="brand-mark">
-                JM
-            </span>
-
-            Job Mart
-
-        </div>
-
-
-        <div class="side-label">
-            Menu
-        </div>
-
-
-        <button
-            class="side-btn"
-            data-page="dashboard"
-            onclick="showDashboard()">
-
-            ▦ Dashboard
-
-        </button>
-
-
-        <button
-            class="side-btn"
-            data-page="jobs"
-            onclick="showJobs()">
-
-            ▣ Jobs
-
-        </button>
-
-
-        ${
-            employer
-            ?
-            `
-            <button
-                class="side-btn"
-                data-page="post"
-                onclick="showPostJob()">
-
-                ＋ Post Job
-
-            </button>
-            `
-            :
-            ""
-        }
-
-
-        <button
-            class="side-btn"
-            data-page="saved"
-            onclick="showSaved()">
-
-            ♡ Saved Jobs
-
-        </button>
-
-
-        <button
-            class="side-btn"
-            data-page="applications"
-            onclick="showApplications()">
-
-            ▤ Applications
-
-        </button>
-
-
-        <button
-            class="side-btn"
-            data-page="notifications"
-            onclick="showNotifications()">
-
-            ♧ Notifications
-
-        </button>
-
-
-        <button
-            class="side-btn"
-            data-page="profile"
-            onclick="showProfile()">
-
-            ♙ Profile
-
-        </button>
-
-
-        <div class="side-spacer"></div>
-
-
-        <button
-            class="side-btn"
-            onclick="doLogout()">
-
-            ↪ Logout
-
-        </button>
-
-    </aside>
-
-    `;
-
-}
-
-
-function shell(content,page){
-
-    app.innerHTML = `
-
-    <div class="shell">
-
-        ${sidebar()}
-
-        <div class="shell-main">
-
-            <header class="topbar">
-
-                <button
-                    class="mobile-menu"
-                    onclick="toggleSidebar()">
-
-                    ☰
-
-                </button>
-
-                <div></div>
-
-                <div class="user-mini">
-
-                    <span>🔔</span>
-
-                    <span>
-                        ${esc(me.name)}
-                    </span>
-
-                    <div class="avatar">
-                        ${esc(initials(me.name))}
-                    </div>
-
-                </div>
-
-            </header>
-
-
-            ${content}
-
-        </div>
-
-    </div>
-
-
-    <nav class="mobile-bottom">
-
-        <button
-            data-page="dashboard"
-            onclick="showDashboard()">
-
-            ⌂
-            <br>
-            Home
-
-        </button>
-
-
-        <button
-            data-page="jobs"
-            onclick="showJobs()">
-
-            ▣
-            <br>
-            Jobs
-
-        </button>
-
-
-        <button
-            data-page="saved"
-            onclick="showSaved()">
-
-            ♡
-            <br>
-            Saved
-
-        </button>
-
-
-        <button
-            data-page="applications"
-            onclick="showApplications()">
-
-            ▤
-            <br>
-            Applications
-
-        </button>
-
-
-        <button
-            data-page="profile"
-            onclick="showProfile()">
-
-            ♙
-            <br>
-            Profile
-
-        </button>
-
-    </nav>
-
-    `;
-
-    setActive(page);
-
-}
-
-
-function setActive(page){
-
-    document
-        .querySelectorAll(
-            ".side-btn,.mobile-bottom button"
-        )
-        .forEach(function(button){
-
+function setActiveNav(page){
+    document.querySelectorAll(".nav-item[data-page]")
+        .forEach(button => {
             button.classList.toggle(
                 "active",
                 button.dataset.page === page
             );
-
         });
-
 }
 
 
-function toggleSidebar(){
+function go(page){
+    state.page = page;
+    closeDrawer();
+    document.getElementById("profileMenu").classList.add("hidden");
+    setActiveNav(page);
 
-    document
-        .getElementById("sidebar")
-        ?.classList.toggle("open");
+    const pages = {
+        home: renderHome,
+        jobs: renderJobs,
+        applications: renderApplications,
+        saved: renderSaved,
+        "post-job": renderPostJob,
+        "my-jobs": renderMyJobs,
+        profile: renderProfile,
+        password: renderPassword,
+        notifications: renderNotifications,
+    };
 
-}
-
-
-function closeSidebar(){
-
-    document
-        .getElementById("sidebar")
-        ?.classList.remove("open");
-
-}
-
-
-/* =====================================================
-   DASHBOARD
-===================================================== */
-
-async function showDashboard(){
-
-    if(!me){
-
-        showLogin();
-        return;
-
+    if(pages[page]){
+        pages[page]();
+    }else{
+        renderHome();
     }
+}
 
-    closeSidebar();
 
-    let data;
+function searchFromHeader(){
+    const value = document.getElementById("topSearch").value.trim();
+
+    go("jobs");
+
+    setTimeout(() => {
+        const input = document.getElementById("jobSearch");
+        if(input){
+            input.value = value;
+            loadJobs();
+        }
+    }, 30);
+}
+
+
+async function loadMe(){
+    try{
+        const data = await api("/api/me");
+        state.user = data.logged_in ? data.user : null;
+        updateHeader();
+        await updateNotificationBadge();
+    }catch(error){
+        state.user = null;
+        updateHeader();
+    }
+}
+
+
+async function updateNotificationBadge(){
+    const badge = document.getElementById("notificationBadge");
+
+    if(!state.user){
+        badge.classList.add("hidden");
+        return;
+    }
 
     try{
-
-        data =
-            await api(
-                "/api/dashboard"
-            );
-
+        const data = await api("/api/notifications");
+        if(data.unread > 0){
+            badge.textContent = data.unread > 99 ? "99+" : data.unread;
+            badge.classList.remove("hidden");
+        }else{
+            badge.classList.add("hidden");
+        }
     }catch(error){
-
-        showLogin();
-        return;
-
+        badge.classList.add("hidden");
     }
-
-    const d =
-        data.dashboard;
-
-    const employer =
-        me.role === "employer" ||
-        me.role === "admin";
+}
 
 
-    const stats =
-        employer
-        ?
-        `
-        <div class="stats">
+function renderHome(){
+    const app = document.getElementById("app");
 
-            <div class="stat">
+    app.innerHTML = `
+        <section class="hero">
+            <h1>Find Your Dream Job</h1>
+            <p>Explore job opportunities, apply online and manage your career.</p>
 
-                <div class="n">
-                    ${d.applications}
-                </div>
-
-                <div class="l">
-                    Applications
-                </div>
-
+            <div class="hero-search">
+                <input
+                    id="homeSearch"
+                    placeholder="Search jobs, skills, companies..."
+                    onkeydown="if(event.key==='Enter') homeSearch()">
+                <button onclick="homeSearch()">Search</button>
             </div>
+        </section>
 
-
-            <div class="stat">
-
-                <div class="n">
-                    ${d.active_jobs}
-                </div>
-
-                <div class="l">
-                    Active Jobs
-                </div>
-
+        <section class="section">
+            <div class="section-head">
+                <h2>${state.user ? "Dashboard" : "Featured Jobs"}</h2>
+                <button class="btn btn-secondary" onclick="go('jobs')">
+                    View all jobs
+                </button>
             </div>
-
-
-            <div class="stat">
-
-                <div class="n">
-                    ${d.notifications}
-                </div>
-
-                <div class="l">
-                    Notifications
-                </div>
-
-            </div>
-
-        </div>
-        `
-        :
-        `
-        <div class="stats">
-
-            <div class="stat">
-
-                <div class="n">
-                    ${d.applications}
-                </div>
-
-                <div class="l">
-                    Jobs you applied
-                </div>
-
-            </div>
-
-
-            <div class="stat">
-
-                <div class="n">
-                    ${d.saved_jobs}
-                </div>
-
-                <div class="l">
-                    Saved Jobs
-                </div>
-
-            </div>
-
-
-            <div class="stat">
-
-                <div class="n">
-                    ${d.notifications}
-                </div>
-
-                <div class="l">
-                    Notifications
-                </div>
-
-            </div>
-
-        </div>
-        `;
-
-
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Dashboard
-                </h1>
-
-                <p>
-                    Welcome back,
-                    ${esc(me.name)}
-                </p>
-
-            </div>
-
 
             ${
-                employer
-                ?
-                `
-                <button
-                    class="btn btn-primary"
-                    onclick="showPostJob()">
-
-                    + Post New Job
-
-                </button>
-                `
-                :
-                `
-                <button
-                    class="btn btn-primary"
-                    onclick="showJobs()">
-
-                    Find Jobs
-
-                </button>
-                `
+                state.user
+                ? `<div id="dashboardArea" class="loading">Loading dashboard...</div>`
+                : `<div id="homeJobs" class="cards">
+                       <div class="loading">Loading jobs...</div>
+                   </div>`
             }
+        </section>
 
-        </div>
-
-
-        ${stats}
-
-
-        <div class="panel">
-
-            <h3>
-                ${
-                    employer
-                    ?
-                    "Recent Applications"
-                    :
-                    "Recent Jobs"
-                }
-            </h3>
-
-            <div id="dashboardList">
-
-                <div class="empty">
-                    Loading...
+        <section class="section">
+            <div class="cards">
+                <div class="card" style="padding:20px">
+                    <h3>🔎 Search</h3>
+                    <p>Search jobs by title, skill, company or location.</p>
                 </div>
 
+                <div class="card" style="padding:20px">
+                    <h3>📄 Apply</h3>
+                    <p>Submit applications and track their status.</p>
+                </div>
+
+                <div class="card" style="padding:20px">
+                    <h3>🔔 Alerts</h3>
+                    <p>Receive notifications about your applications.</p>
+                </div>
             </div>
+        </section>
 
+        <div class="footer">
+            Job Mart • Theme 2 • Responsive job marketplace
         </div>
+    `;
 
-    </main>
-
-    `,"dashboard");
-
-
-    if(employer){
-
-        loadEmployerRecent();
-
+    if(state.user){
+        loadDashboard();
     }else{
-
-        loadSeekerRecent();
-
+        loadFeaturedJobs();
     }
-
 }
 
 
-async function loadSeekerRecent(){
+function homeSearch(){
+    const value = document.getElementById("homeSearch").value.trim();
+    go("jobs");
 
-    const box =
-        document.getElementById(
-            "dashboardList"
-        );
+    setTimeout(() => {
+        const input = document.getElementById("jobSearch");
+        if(input){
+            input.value = value;
+            loadJobs();
+        }
+    }, 30);
+}
+
+
+async function loadFeaturedJobs(){
+    const box = document.getElementById("homeJobs");
+    if(!box) return;
 
     try{
+        const data = await api("/api/jobs");
+        const jobs = data.jobs.slice(0,6);
 
-        const data =
-            await api(
-                "/api/jobs"
-            );
-
-        const rows =
-            (data.jobs || [])
-            .slice(0,5);
-
-        box.innerHTML =
-            rows.length
-            ?
-            rows.map(jobCard).join("")
-            :
-            `
-            <div class="empty">
+        if(!jobs.length){
+            box.innerHTML = `<div class="empty" style="grid-column:1/-1">
                 No jobs posted yet.
-            </div>
-            `;
-
-    }catch(error){
-
-        box.innerHTML =
-            `<div class="empty">
-                ${esc(error.message)}
             </div>`;
-
-    }
-
-}
-
-
-async function loadEmployerRecent(){
-
-    const box =
-        document.getElementById(
-            "dashboardList"
-        );
-
-    try{
-
-        const data =
-            await api(
-                "/api/applications"
-            );
-
-        const rows =
-            (data.applications || [])
-            .slice(0,5);
-
-        if(!rows.length){
-
-            box.innerHTML =
-                `
-                <div class="empty">
-                    No applications yet.
-                </div>
-                `;
-
             return;
-
         }
 
-        box.innerHTML = `
-
-        <div class="table-wrap">
-
-            <table>
-
-                <thead>
-
-                    <tr>
-
-                        <th>
-                            Applicant
-                        </th>
-
-                        <th>
-                            Job
-                        </th>
-
-                        <th>
-                            Email
-                        </th>
-
-                        <th>
-                            Status
-                        </th>
-
-                    </tr>
-
-                </thead>
-
-
-                <tbody>
-
-                    ${
-                        rows.map(function(a){
-
-                            return `
-
-                            <tr>
-
-                                <td>
-                                    <b>
-                                        ${esc(a.applicant_name)}
-                                    </b>
-                                </td>
-
-                                <td>
-                                    ${esc(a.title)}
-                                </td>
-
-                                <td>
-                                    ${esc(a.applicant_email)}
-                                </td>
-
-                                <td>
-                                    <span class="status">
-                                        ${esc(a.status)}
-                                    </span>
-                                </td>
-
-                            </tr>
-
-                            `;
-
-                        }).join("")
-                    }
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-        `;
-
+        box.innerHTML = jobs.map(jobCard).join("");
     }catch(error){
-
-        box.innerHTML =
-            `<div class="empty">
-                ${esc(error.message)}
-            </div>`;
-
+        box.innerHTML = `<div class="empty" style="grid-column:1/-1">
+            ${escapeHtml(error.message)}
+        </div>`;
     }
-
 }
 
 
-/* =====================================================
-   JOBS
-===================================================== */
+async function loadDashboard(){
+    const box = document.getElementById("dashboardArea");
+    if(!box) return;
 
-async function showJobs(params={}){
+    try{
+        const data = await api("/api/dashboard");
+        const s = data.stats;
 
-    if(!me){
+        if(data.role === "employer"){
+            box.innerHTML = `
+                <div class="stats">
+                    <div class="card stat">
+                        <strong>${s.total_jobs}</strong>
+                        <span>Total Jobs</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>${s.active_jobs}</strong>
+                        <span>Active Jobs</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>${s.total_applications}</strong>
+                        <span>Applications</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>${s.unread_notifications}</strong>
+                        <span>Unread Alerts</span>
+                    </div>
+                </div>
 
-        showLogin();
-        return;
+                <div class="card" style="padding:20px;margin-top:15px">
+                    <h3>Employer shortcuts</h3>
+                    <div class="card-actions">
+                        <button class="btn btn-primary" onclick="go('post-job')">
+                            + Post a Job
+                        </button>
+                        <button class="btn btn-secondary" onclick="go('my-jobs')">
+                            Manage My Jobs
+                        </button>
+                    </div>
+                </div>
+            `;
+        }else{
+            box.innerHTML = `
+                <div class="stats">
+                    <div class="card stat">
+                        <strong>${s.total_applications}</strong>
+                        <span>Applications</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>${s.saved_jobs}</strong>
+                        <span>Saved Jobs</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>${s.unread_notifications}</strong>
+                        <span>Unread Alerts</span>
+                    </div>
+                    <div class="card stat">
+                        <strong>✓</strong>
+                        <span>Profile Ready</span>
+                    </div>
+                </div>
 
+                <div class="card" style="padding:20px;margin-top:15px">
+                    <h3>Jobseeker shortcuts</h3>
+                    <div class="card-actions">
+                        <button class="btn btn-primary" onclick="go('jobs')">
+                            Browse Jobs
+                        </button>
+                        <button class="btn btn-secondary" onclick="go('applications')">
+                            My Applications
+                        </button>
+                        <button class="btn btn-outline" onclick="go('saved')">
+                            Saved Jobs
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+    }catch(error){
+        box.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
     }
+}
 
-    closeSidebar();
 
-    shell(`
+function jobCard(job){
+    const skillTags = (job.skills_list || [])
+        .slice(0,4)
+        .map(skill => `<span class="tag">${escapeHtml(skill)}</span>`)
+        .join("");
 
-    <main class="page">
+    const canApply = state.user &&
+        state.user.role === "jobseeker";
 
-        <div class="page-title">
+    return `
+        <article class="card job-card">
+            <h3>${escapeHtml(job.title)}</h3>
+            <div class="company">${escapeHtml(job.company)}</div>
 
-            <div>
-
-                <h1>
-                    Jobs
-                </h1>
-
-                <p>
-                    Find your next opportunity
-                </p>
-
+            <div class="meta">
+                <span>📍 ${escapeHtml(job.location || job.country)}</span>
+                <span>• ${escapeHtml(job.job_type)}</span>
+                <span>• ${escapeHtml(job.work_mode)}</span>
             </div>
 
+            <div class="meta">
+                <span class="tag">${escapeHtml(job.category)}</span>
+                ${skillTags}
+            </div>
+
+            <div class="salary">
+                ${escapeHtml(job.salary || "Salary not specified")}
+            </div>
+
+            <p style="color:#68758a;line-height:1.55">
+                ${escapeHtml(
+                    job.description.length > 180
+                    ? job.description.slice(0,180) + "..."
+                    : job.description
+                )}
+            </p>
+
+            <div class="card-actions">
+                <button class="btn btn-primary"
+                        onclick="openJob(${job.id})">
+                    View Details
+                </button>
+
+                ${
+                    canApply
+                    ? `<button
+                        class="btn btn-secondary"
+                        onclick="saveJob(${job.id})">
+                        ${job.saved ? "♥ Saved" : "♡ Save"}
+                       </button>`
+                    : ""
+                }
+            </div>
+        </article>
+    `;
+}
+
+
+async function renderJobs(){
+    const app = document.getElementById("app");
+
+    app.innerHTML = `
+        <div class="section-head">
+            <h2>Browse Jobs</h2>
         </div>
 
+        <div class="card" style="padding:15px">
+            <div class="filters">
+                <input id="jobSearch"
+                       class="field"
+                       placeholder="Search jobs, skills, companies..."
+                       onkeydown="if(event.key==='Enter') loadJobs()">
 
-        <div class="panel">
-
-            <div
-                class="search-row"
-                style="box-shadow:none">
-
-                <input
-                    id="jobsQ"
-                    class="field"
-                    placeholder="Search jobs..."
-                    value="${esc(params.q || "")}"
-                >
-
-
-                <select
-                    id="jobsCountry"
-                    class="select">
-
-                    <option value="">
-                        All Countries
-                    </option>
-
-                    <option>India</option>
-                    <option>USA</option>
-                    <option>UAE</option>
-                    <option>UK</option>
+                <select id="jobCategory" class="field">
+                    <option value="">All categories</option>
+                    <option>IT & Software</option>
+                    <option>Sales</option>
+                    <option>Marketing</option>
+                    <option>Finance</option>
+                    <option>Healthcare</option>
+                    <option>Education</option>
+                    <option>Engineering</option>
+                    <option>Design</option>
+                    <option>Customer Support</option>
                     <option>Other</option>
-
                 </select>
 
+                <input id="jobCountry"
+                       class="field"
+                       placeholder="Country">
 
-                <select
-                    id="jobsType"
-                    class="select">
-
-                    <option value="">
-                        All Types
-                    </option>
-
+                <select id="jobType" class="field">
+                    <option value="">All job types</option>
                     <option>Full-time</option>
                     <option>Part-time</option>
                     <option>Contract</option>
+                    <option>Internship</option>
                     <option>Freelance</option>
-
                 </select>
 
+                <select id="workMode" class="field">
+                    <option value="">All work modes</option>
+                    <option>On-site</option>
+                    <option>Remote</option>
+                    <option>Hybrid</option>
+                </select>
 
-                <button
-                    class="btn btn-primary"
-                    onclick="searchJobs()">
-
+                <button class="btn btn-primary" onclick="loadJobs()">
                     Search
-
                 </button>
-
             </div>
-
         </div>
 
+        <section class="section">
+            <div id="jobsResult" class="cards">
+                <div class="loading" style="grid-column:1/-1">
+                    Loading jobs...
+                </div>
+            </div>
+        </section>
+    `;
 
-        <div
-            id="jobsResults"
-            class="job-grid">
-
-        </div>
-
-    </main>
-
-    `,"jobs");
-
-
-    if(params.country){
-
-        document.getElementById(
-            "jobsCountry"
-        ).value = params.country;
-
-    }
-
-    if(params.job_type){
-
-        document.getElementById(
-            "jobsType"
-        ).value = params.job_type;
-
-    }
-
-    await loadJobs(params);
-
+    await loadJobs();
 }
 
 
-async function searchJobs(){
-
-    const params = {
-
-        q:
-            document
-            .getElementById(
-                "jobsQ"
-            )
-            .value
-            .trim(),
-
-        country:
-            document
-            .getElementById(
-                "jobsCountry"
-            )
-            .value,
-
-        job_type:
-            document
-            .getElementById(
-                "jobsType"
-            )
-            .value
-
-    };
-
-    await loadJobs(params);
-
-}
-
-
-async function loadJobs(params={}){
-
-    const box =
-        document.getElementById(
-            "jobsResults"
-        );
-
+async function loadJobs(){
+    const box = document.getElementById("jobsResult");
     if(!box) return;
 
-    box.innerHTML =
-        `<div class="empty"
-              style="grid-column:1/-1">
+    box.innerHTML = `
+        <div class="loading" style="grid-column:1/-1">
             Loading jobs...
-        </div>`;
+        </div>
+    `;
+
+    const params = new URLSearchParams();
+
+    const values = {
+        q: document.getElementById("jobSearch")?.value || "",
+        category: document.getElementById("jobCategory")?.value || "",
+        country: document.getElementById("jobCountry")?.value || "",
+        job_type: document.getElementById("jobType")?.value || "",
+        work_mode: document.getElementById("workMode")?.value || ""
+    };
+
+    Object.entries(values).forEach(([key,value]) => {
+        if(value.trim()) params.set(key,value.trim());
+    });
 
     try{
-
-        const query =
-            new URLSearchParams(params)
-            .toString();
-
-        const data =
-            await api(
-                "/api/jobs" +
-                (
-                    query
-                    ?
-                    "?" + query
-                    :
-                    ""
-                )
-            );
-
-        jobsCache =
-            data.jobs || [];
-
-        box.innerHTML =
-            jobsCache.length
-            ?
-            jobsCache
-                .map(jobCard)
-                .join("")
-            :
-            `
-            <div
-                class="empty"
-                style="grid-column:1/-1">
-
-                No jobs found.
-
-            </div>
-            `;
-
-    }catch(error){
-
-        box.innerHTML =
-            `<div
-                class="empty"
-                style="grid-column:1/-1">
-
-                ${esc(error.message)}
-
-            </div>`;
-
-    }
-
-}
-
-
-/* =====================================================
-   JOB DETAILS
-===================================================== */
-
-async function showJob(id){
-
-    if(!me){
-
-        showLogin();
-        return;
-
-    }
-
-    try{
-
-        const data =
-            await api(
-                "/api/jobs/" + id
-            );
-
-        const job =
-            data.job;
-
-        shell(`
-
-        <main class="page">
-
-            <div style="margin-bottom:12px">
-
-                <button
-                    class="btn btn-outline btn-small"
-                    onclick="showJobs()">
-
-                    ← Back to Jobs
-
-                </button>
-
-            </div>
-
-
-            <div class="detail-grid">
-
-                <div class="detail-card">
-
-                    <div class="job-head">
-
-                        <div class="company-icon">
-                            ▣
-                        </div>
-
-                        <div>
-
-                            <h1>
-                                ${esc(job.title)}
-                            </h1>
-
-                            <div class="company">
-                                ${esc(job.company)}
-                            </div>
-
-                            <div class="tags">
-
-                                <span class="tag">
-                                    ${esc(job.country)}
-                                </span>
-
-                                <span class="tag">
-                                    ${esc(job.job_type)}
-                                </span>
-
-                                <span class="tag">
-                                    ${esc(job.work_mode)}
-                                </span>
-
-                            </div>
-
-                        </div>
-
-                    </div>
-
-
-                    <h2>
-                        Description
-                    </h2>
-
-                    <p>
-                        ${esc(job.description)}
-                    </p>
-
-
-                    <h2>
-                        Skills
-                    </h2>
-
-                    <p>
-                        ${esc(job.skills || "Not specified")}
-                    </p>
-
-
-                    <h2>
-                        Salary
-                    </h2>
-
-                    <p>
-                        ${esc(job.salary || "Not specified")}
-                    </p>
-
-
-                    <h2>
-                        Location
-                    </h2>
-
-                    <p>
-                        ${esc(
-                            job.location ||
-                            job.country
-                        )}
-                    </p>
-
-                </div>
-
-
-                <div class="detail-card">
-
-                    <h2 style="margin-top:0">
-                        Actions
-                    </h2>
-
-                    <div class="action-stack">
-
-                        ${
-                            me.role === "jobseeker"
-                            ?
-                            `
-                            <button
-                                class="btn btn-primary"
-                                onclick="applyJob(${job.id})"
-                                ${
-                                    job.applied
-                                    ?
-                                    "disabled"
-                                    :
-                                    ""
-                                }>
-
-                                ${
-                                    job.applied
-                                    ?
-                                    "Already Applied"
-                                    :
-                                    "Apply Now"
-                                }
-
-                            </button>
-                            `
-                            :
-                            ""
-                        }
-
-
-                        ${
-                            me.role === "jobseeker"
-                            ?
-                            `
-                            <button
-                                class="btn btn-outline"
-                                onclick="saveJob(${job.id})">
-
-                                ${
-                                    job.saved
-                                    ?
-                                    "♥ Remove Saved"
-                                    :
-                                    "♡ Save Job"
-                                }
-
-                            </button>
-                            `
-                            :
-                            ""
-                        }
-
-
-                        ${
-                            me.role === "employer" &&
-                            job.employer_id === me.id
-                            ?
-                            `
-                            <button
-                                class="btn btn-danger"
-                                onclick="closeJob(${job.id})">
-
-                                Close Job
-
-                            </button>
-                            `
-                            :
-                            ""
-                        }
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </main>
-
-        `,"jobs");
-
-    }catch(error){
-
-        alert(error.message);
-        showJobs();
-
-    }
-
-}
-
-
-async function applyJob(id){
-
-    const cover =
-        prompt(
-            "Optional cover letter:"
+        const data = await api(
+            "/api/jobs?" + params.toString()
         );
 
-    if(cover === null)
-        return;
+        state.jobs = data.jobs;
+
+        if(!data.jobs.length){
+            box.innerHTML = `
+                <div class="empty" style="grid-column:1/-1">
+                    No jobs found. Try another search.
+                </div>
+            `;
+            return;
+        }
+
+        box.innerHTML = data.jobs.map(jobCard).join("");
+    }catch(error){
+        box.innerHTML = `
+            <div class="empty" style="grid-column:1/-1">
+                ${escapeHtml(error.message)}
+            </div>
+        `;
+    }
+}
+
+
+async function openJob(id){
+    try{
+        const data = await api(`/api/jobs/${id}`);
+        const job = data.job;
+
+        const skills = (job.skills_list || [])
+            .map(x => `<span class="tag">${escapeHtml(x)}</span>`)
+            .join(" ");
+
+        const canApply = state.user &&
+            state.user.role === "jobseeker" &&
+            !job.applied &&
+            job.status === "active";
+
+        document.getElementById("modalRoot").innerHTML = `
+            <div class="modal" onclick="if(event.target===this)closeModal()">
+                <div class="modal-box">
+                    <div class="modal-head">
+                        <h3>${escapeHtml(job.title)}</h3>
+                        <button class="modal-close"
+                                onclick="closeModal()">×</button>
+                    </div>
+
+                    <div class="modal-body">
+                        <p><strong>Company:</strong>
+                           ${escapeHtml(job.company)}</p>
+
+                        <p><strong>Category:</strong>
+                           ${escapeHtml(job.category)}</p>
+
+                        <p><strong>Location:</strong>
+                           ${escapeHtml(job.location || job.country)}</p>
+
+                        <p><strong>Job type:</strong>
+                           ${escapeHtml(job.job_type)}</p>
+
+                        <p><strong>Work mode:</strong>
+                           ${escapeHtml(job.work_mode)}</p>
+
+                        <p><strong>Salary:</strong>
+                           ${escapeHtml(job.salary || "Not specified")}</p>
+
+                        <p><strong>Employer:</strong>
+                           ${escapeHtml(job.employer_name)}</p>
+
+                        <p><strong>Description:</strong></p>
+                        <p style="white-space:pre-wrap;line-height:1.6">
+                            ${escapeHtml(job.description)}
+                        </p>
+
+                        <p><strong>Skills:</strong></p>
+                        <div class="meta">${skills || "Not specified"}</div>
+
+                        <div class="card-actions">
+                            ${
+                                canApply
+                                ? `<button class="btn btn-primary"
+                                    onclick="showApply(${job.id})">
+                                    Apply Now
+                                   </button>`
+                                : ""
+                            }
+
+                            ${
+                                state.user &&
+                                state.user.role === "jobseeker"
+                                ? `<button class="btn btn-secondary"
+                                    onclick="saveJob(${job.id})">
+                                    ${job.saved ? "♥ Saved" : "♡ Save Job"}
+                                   </button>`
+                                : ""
+                            }
+
+                            ${
+                                job.applied
+                                ? `<span class="tag">✓ Already Applied</span>`
+                                : ""
+                            }
+
+                            ${
+                                !state.user
+                                ? `<button class="btn btn-primary"
+                                    onclick="closeModal();showLogin()">
+                                    Login to Apply
+                                   </button>`
+                                : ""
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+function closeModal(){
+    document.getElementById("modalRoot").innerHTML = "";
+}
+
+
+function showApply(jobId){
+    document.getElementById("modalRoot").innerHTML = `
+        <div class="modal">
+            <div class="modal-box">
+                <div class="modal-head">
+                    <h3>Apply for Job</h3>
+                    <button class="modal-close"
+                            onclick="closeModal()">×</button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Cover Letter</label>
+                        <textarea
+                            id="coverLetter"
+                            class="textarea"
+                            placeholder="Write a short cover letter..."></textarea>
+                    </div>
+
+                    <div class="card-actions" style="margin-top:15px">
+                        <button class="btn btn-primary"
+                                onclick="submitApplication(${jobId})">
+                            Submit Application
+                        </button>
+                        <button class="btn btn-outline"
+                                onclick="closeModal()">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+
+async function submitApplication(jobId){
+    const cover = document.getElementById("coverLetter")?.value || "";
 
     try{
-
-        await api(
-            "/api/jobs/" + id + "/apply",
+        const data = await api(
+            `/api/jobs/${jobId}/apply`,
             {
                 method:"POST",
-                body:{
-                    cover_letter:cover
-                }
+                body:{cover_letter:cover}
             }
         );
 
-        alert(
-            "Application submitted successfully!"
-        );
-
-        showJob(id);
-
+        closeModal();
+        toast(data.message);
+        await updateNotificationBadge();
+        go("applications");
     }catch(error){
-
-        alert(error.message);
-
+        toast(error.message,true);
     }
-
 }
 
 
 async function saveJob(id){
-
-    try{
-
-        const data =
-            await api(
-                "/api/jobs/" +
-                id +
-                "/save",
-                {
-                    method:"POST"
-                }
-            );
-
-        alert(data.message);
-
-        showJob(id);
-
-    }catch(error){
-
-        alert(error.message);
-
+    if(!state.user){
+        showLogin();
+        return;
     }
 
+    try{
+        const data = await api(
+            `/api/jobs/${id}/save`,
+            {method:"POST"}
+        );
+
+        toast(data.message);
+
+        if(state.page === "jobs"){
+            await loadJobs();
+        }else if(state.page === "saved"){
+            await renderSaved();
+        }
+
+        await updateNotificationBadge();
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+async function renderApplications(){
+    const app = document.getElementById("app");
+
+    if(!state.user){
+        showLogin();
+        return;
+    }
+
+    app.innerHTML = `
+        <div class="section-head">
+            <h2>My Applications</h2>
+        </div>
+        <div id="applicationsArea">
+            <div class="loading">Loading applications...</div>
+        </div>
+    `;
+
+    try{
+        const data = await api("/api/applications/mine");
+
+        if(!data.applications.length){
+            document.getElementById("applicationsArea").innerHTML =
+                `<div class="empty">
+                    You have not applied to any jobs yet.
+                    <br><br>
+                    <button class="btn btn-primary"
+                            onclick="go('jobs')">
+                        Browse Jobs
+                    </button>
+                 </div>`;
+            return;
+        }
+
+        document.getElementById("applicationsArea").innerHTML = `
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job</th>
+                            <th>Company</th>
+                            <th>Location</th>
+                            <th>Status</th>
+                            <th>Applied</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.applications.map(a => `
+                            <tr>
+                                <td>
+                                    <strong>${escapeHtml(a.title)}</strong>
+                                    <br>
+                                    <small>${escapeHtml(a.job_type)}
+                                    • ${escapeHtml(a.work_mode)}</small>
+                                </td>
+                                <td>${escapeHtml(a.company)}</td>
+                                <td>${escapeHtml(a.location || a.country)}</td>
+                                <td>
+                                    <span class="status ${escapeHtml(a.status)}">
+                                        ${escapeHtml(a.status)}
+                                    </span>
+                                </td>
+                                <td>${formatDate(a.created_at)}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }catch(error){
+        document.getElementById("applicationsArea").innerHTML =
+            `<div class="empty">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+
+async function renderSaved(){
+    const app = document.getElementById("app");
+
+    if(!state.user){
+        showLogin();
+        return;
+    }
+
+    app.innerHTML = `
+        <div class="section-head">
+            <h2>Saved Jobs</h2>
+        </div>
+        <div id="savedArea" class="cards">
+            <div class="loading" style="grid-column:1/-1">
+                Loading saved jobs...
+            </div>
+        </div>
+    `;
+
+    try{
+        const data = await api("/api/saved-jobs");
+        const box = document.getElementById("savedArea");
+
+        if(!data.jobs.length){
+            box.innerHTML = `
+                <div class="empty" style="grid-column:1/-1">
+                    No saved jobs yet.
+                    <br><br>
+                    <button class="btn btn-primary"
+                            onclick="go('jobs')">
+                        Browse Jobs
+                    </button>
+                </div>
+            `;
+            return;
+        }
+
+        box.innerHTML = data.jobs.map(jobCard).join("");
+    }catch(error){
+        document.getElementById("savedArea").innerHTML =
+            `<div class="empty" style="grid-column:1/-1">
+                ${escapeHtml(error.message)}
+             </div>`;
+    }
+}
+
+
+function renderPostJob(){
+    if(!state.user ||
+       !["employer","admin"].includes(state.user.role)){
+        showLogin();
+        return;
+    }
+
+    state.editingJobId = null;
+
+    document.getElementById("app").innerHTML =
+        jobFormHtml(false);
+}
+
+
+function jobFormHtml(editing, job={}){
+    return `
+        <div class="section-head">
+            <h2>${editing ? "Edit Job" : "Post a Job"}</h2>
+        </div>
+
+        <form class="card form-card"
+              onsubmit="submitJob(event,${editing ? job.id : "null"})">
+
+            <div class="form-grid">
+
+                <div class="form-group">
+                    <label>Job Title *</label>
+                    <input id="fTitle" class="field" required
+                           maxlength="150"
+                           value="${escapeHtml(job.title || "")}">
+                </div>
+
+                <div class="form-group">
+                    <label>Company *</label>
+                    <input id="fCompany" class="field" required
+                           maxlength="150"
+                           value="${escapeHtml(job.company || "")}">
+                </div>
+
+                <div class="form-group">
+                    <label>Category *</label>
+                    <select id="fCategory" class="field" required>
+                        ${categoryOptions(job.category || "")}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Country *</label>
+                    <input id="fCountry" class="field" required
+                           maxlength="80"
+                           value="${escapeHtml(job.country || "")}">
+                </div>
+
+                <div class="form-group">
+                    <label>Location</label>
+                    <input id="fLocation" class="field"
+                           maxlength="150"
+                           value="${escapeHtml(job.location || "")}">
+                </div>
+
+                <div class="form-group">
+                    <label>Job Type *</label>
+                    <select id="fJobType" class="field" required>
+                        ${selectOptions(
+                            ["Full-time","Part-time","Contract","Internship","Freelance"],
+                            job.job_type || ""
+                        )}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Work Mode *</label>
+                    <select id="fWorkMode" class="field" required>
+                        ${selectOptions(
+                            ["On-site","Remote","Hybrid"],
+                            job.work_mode || ""
+                        )}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Salary</label>
+                    <input id="fSalary" class="field"
+                           maxlength="100"
+                           placeholder="Example: ₹6 - ₹12 LPA"
+                           value="${escapeHtml(job.salary || "")}">
+                </div>
+
+                <div class="form-group full">
+                    <label>Skills</label>
+                    <input id="fSkills" class="field"
+                           maxlength="1000"
+                           placeholder="Python, FastAPI, SQL, JavaScript"
+                           value="${escapeHtml(job.skills || "")}">
+                </div>
+
+                <div class="form-group full">
+                    <label>Application Email</label>
+                    <input id="fEmail" class="field"
+                           type="email"
+                           maxlength="200"
+                           placeholder="hr@example.com"
+                           value="${escapeHtml(job.application_email || "")}">
+                </div>
+
+                <div class="form-group full">
+                    <label>Description *</label>
+                    <textarea id="fDescription"
+                              class="textarea"
+                              required
+                              maxlength="5000"
+                              placeholder="Describe the role, responsibilities and requirements...">${escapeHtml(job.description || "")}</textarea>
+                </div>
+
+            </div>
+
+            <div class="card-actions">
+                <button class="btn btn-primary" type="submit">
+                    ${editing ? "Update Job" : "Publish Job"}
+                </button>
+                <button class="btn btn-outline"
+                        type="button"
+                        onclick="go('${editing ? "my-jobs" : "home"}')">
+                    Cancel
+                </button>
+            </div>
+        </form>
+    `;
+}
+
+
+function categoryOptions(selected){
+    const items = [
+        "IT & Software",
+        "Sales",
+        "Marketing",
+        "Finance",
+        "Healthcare",
+        "Education",
+        "Engineering",
+        "Design",
+        "Customer Support",
+        "Other"
+    ];
+
+    return `
+        <option value="">Select category</option>
+        ${items.map(x =>
+            `<option value="${escapeHtml(x)}"
+                ${x===selected ? "selected" : ""}>
+                ${escapeHtml(x)}
+             </option>`
+        ).join("")}
+    `;
+}
+
+
+function selectOptions(items, selected){
+    return `
+        <option value="">Select</option>
+        ${items.map(x =>
+            `<option value="${escapeHtml(x)}"
+                ${x===selected ? "selected" : ""}>
+                ${escapeHtml(x)}
+             </option>`
+        ).join("")}
+    `;
+}
+
+
+async function submitJob(event, jobId){
+    event.preventDefault();
+
+    const body = {
+        title: document.getElementById("fTitle").value,
+        company: document.getElementById("fCompany").value,
+        category: document.getElementById("fCategory").value,
+        country: document.getElementById("fCountry").value,
+        location: document.getElementById("fLocation").value,
+        job_type: document.getElementById("fJobType").value,
+        work_mode: document.getElementById("fWorkMode").value,
+        salary: document.getElementById("fSalary").value,
+        skills: document.getElementById("fSkills").value,
+        application_email: document.getElementById("fEmail").value,
+        description: document.getElementById("fDescription").value
+    };
+
+    try{
+        const data = jobId
+            ? await api(`/api/jobs/${jobId}`,{
+                method:"PUT",
+                body
+            })
+            : await api("/api/jobs",{
+                method:"POST",
+                body
+            });
+
+        toast(data.message);
+        go("my-jobs");
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+async function renderMyJobs(){
+    const app = document.getElementById("app");
+
+    if(!state.user ||
+       !["employer","admin"].includes(state.user.role)){
+        showLogin();
+        return;
+    }
+
+    app.innerHTML = `
+        <div class="section-head">
+            <h2>My Jobs</h2>
+            <button class="btn btn-primary"
+                    onclick="go('post-job')">
+                + Post a Job
+            </button>
+        </div>
+
+        <div id="myJobsArea">
+            <div class="loading">Loading jobs...</div>
+        </div>
+    `;
+
+    try{
+        const data = await api("/api/jobs?mine=true&include_closed=true");
+        const box = document.getElementById("myJobsArea");
+
+        if(!data.jobs.length){
+            box.innerHTML = `
+                <div class="empty">
+                    No jobs posted yet.
+                    <br><br>
+                    <button class="btn btn-primary"
+                            onclick="go('post-job')">
+                        Post Your First Job
+                    </button>
+                </div>
+            `;
+            return;
+        }
+
+        box.innerHTML = `
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Job</th>
+                            <th>Status</th>
+                            <th>Applications</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.jobs.map(job => `
+                            <tr>
+                                <td>
+                                    <strong>${escapeHtml(job.title)}</strong>
+                                    <br>
+                                    <small>${escapeHtml(job.company)}</small>
+                                </td>
+                                <td>
+                                    <span class="status ${escapeHtml(job.status)}">
+                                        ${escapeHtml(job.status)}
+                                    </span>
+                                </td>
+                                <td>
+                                    <button class="btn btn-secondary"
+                                            onclick="viewApplicants(${job.id})">
+                                        View
+                                    </button>
+                                </td>
+                                <td>${formatDate(job.created_at)}</td>
+                                <td>
+                                    <div class="card-actions">
+                                        <button class="btn btn-outline"
+                                                onclick="editJob(${job.id})">
+                                            Edit
+                                        </button>
+                                        ${
+                                            job.status === "active"
+                                            ? `<button class="btn btn-danger"
+                                                onclick="closeJob(${job.id})">
+                                                Close
+                                               </button>`
+                                            : `<button class="btn btn-success"
+                                                onclick="reopenJob(${job.id})">
+                                                Reopen
+                                               </button>`
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }catch(error){
+        document.getElementById("myJobsArea").innerHTML =
+            `<div class="empty">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+
+async function editJob(id){
+    try{
+        const data = await api(`/api/jobs/${id}`);
+        state.editingJobId = id;
+
+        document.getElementById("app").innerHTML =
+            jobFormHtml(true,data.job);
+    }catch(error){
+        toast(error.message,true);
+    }
 }
 
 
 async function closeJob(id){
-
-    if(
-        !confirm(
-            "Close this job?"
-        )
-    ){
+    if(!confirm("Close this job?")){
         return;
     }
 
     try{
-
-        await api(
-            "/api/jobs/" + id,
-            {
-                method:"DELETE"
-            }
+        const data = await api(
+            `/api/jobs/${id}`,
+            {method:"DELETE"}
         );
-
-        alert(
-            "Job closed successfully."
-        );
-
-        showJobs();
-
+        toast(data.message);
+        await renderMyJobs();
     }catch(error){
-
-        alert(error.message);
-
+        toast(error.message,true);
     }
-
 }
 
 
-/* =====================================================
-   SAVED JOBS
-===================================================== */
-
-async function showSaved(){
-
-    if(!me){
-
-        showLogin();
-        return;
-
-    }
-
-    closeSidebar();
-
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Saved Jobs
-                </h1>
-
-                <p>
-                    Jobs you saved
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div
-            id="savedResults"
-            class="job-grid">
-
-        </div>
-
-    </main>
-
-    `,"saved");
-
-
-    const box =
-        document.getElementById(
-            "savedResults"
-        );
-
+async function reopenJob(id){
     try{
-
-        const data =
-            await api(
-                "/api/saved-jobs"
-            );
-
-        const rows =
-            data.jobs || [];
-
-        box.innerHTML =
-            rows.length
-            ?
-            rows.map(jobCard).join("")
-            :
-            `
-            <div
-                class="empty"
-                style="grid-column:1/-1">
-
-                No saved jobs yet.
-
-            </div>
-            `;
-
+        const data = await api(
+            `/api/jobs/${id}/reopen`,
+            {method:"POST"}
+        );
+        toast(data.message);
+        await renderMyJobs();
     }catch(error){
-
-        box.innerHTML =
-            `<div
-                class="empty"
-                style="grid-column:1/-1">
-
-                ${esc(error.message)}
-
-            </div>`;
-
+        toast(error.message,true);
     }
-
 }
 
 
-/* =====================================================
-   APPLICATIONS
-===================================================== */
-
-async function showApplications(){
-
-    if(!me){
-
-        showLogin();
-        return;
-
-    }
-
-    closeSidebar();
-
-    const employer =
-        me.role === "employer" ||
-        me.role === "admin";
-
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Applications
-                </h1>
-
-                <p>
-                    ${
-                        employer
-                        ?
-                        "Applications received"
-                        :
-                        "Jobs you applied for"
-                    }
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div
-            id="applicationsResults">
-
-        </div>
-
-    </main>
-
-    `,"applications");
-
-
-    const box =
-        document.getElementById(
-            "applicationsResults"
+async function viewApplicants(jobId){
+    try{
+        const data = await api(
+            `/api/jobs/${jobId}/applications`
         );
 
-    try{
+        const list = data.applications;
 
-        const data =
-            await api(
-                "/api/applications"
-            );
+        document.getElementById("modalRoot").innerHTML = `
+            <div class="modal">
+                <div class="modal-box">
+                    <div class="modal-head">
+                        <h3>
+                            Applications -
+                            ${escapeHtml(data.job.title)}
+                        </h3>
+                        <button class="modal-close"
+                                onclick="closeModal()">×</button>
+                    </div>
 
-        const rows =
-            data.applications || [];
+                    <div class="modal-body">
+                        ${
+                            !list.length
+                            ? `<div class="empty">
+                                No applications yet.
+                               </div>`
+                            : list.map(a => `
+                                <div class="card"
+                                     style="padding:15px;margin-bottom:12px">
+                                    <strong>${escapeHtml(a.applicant_name)}</strong>
+                                    <div style="color:#68758a">
+                                        ${escapeHtml(a.applicant_email)}
+                                        ${a.applicant_phone
+                                            ? " • " + escapeHtml(a.applicant_phone)
+                                            : ""}
+                                    </div>
 
-        if(!rows.length){
+                                    <p>
+                                        <strong>Status:</strong>
+                                        <span class="status ${escapeHtml(a.status)}">
+                                            ${escapeHtml(a.status)}
+                                        </span>
+                                    </p>
 
-            box.innerHTML =
-                `
-                <div class="empty">
-                    No applications yet.
+                                    <p style="white-space:pre-wrap">
+                                        ${escapeHtml(
+                                            a.cover_letter || "No cover letter"
+                                        )}
+                                    </p>
+
+                                    <select
+                                        class="field"
+                                        onchange="changeApplicationStatus(
+                                            ${a.id},this.value)">
+                                        ${selectOptions(
+                                            ["applied","reviewing","shortlisted","rejected","hired"],
+                                            a.status
+                                        )}
+                                    </select>
+                                </div>
+                              `).join("")
+                        }
+                    </div>
                 </div>
-                `;
-
-            return;
-
-        }
-
-
-        if(!employer){
-
-            box.innerHTML = `
-
-            <div class="panel">
-
-                <div class="table-wrap">
-
-                    <table>
-
-                        <thead>
-
-                            <tr>
-
-                                <th>
-                                    Job
-                                </th>
-
-                                <th>
-                                    Company
-                                </th>
-
-                                <th>
-                                    Location
-                                </th>
-
-                                <th>
-                                    Applied
-                                </th>
-
-                                <th>
-                                    Status
-                                </th>
-
-                            </tr>
-
-                        </thead>
-
-
-                        <tbody>
-
-                            ${
-                                rows.map(function(a){
-
-                                    return `
-
-                                    <tr>
-
-                                        <td>
-                                            <b>
-                                                ${esc(a.title)}
-                                            </b>
-                                        </td>
-
-                                        <td>
-                                            ${esc(a.company)}
-                                        </td>
-
-                                        <td>
-                                            ${esc(
-                                                a.location ||
-                                                a.country
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            ${fmtDate(
-                                                a.created_at
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            <span class="status">
-                                                ${esc(a.status)}
-                                            </span>
-                                        </td>
-
-                                    </tr>
-
-                                    `;
-
-                                }).join("")
-                            }
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-
             </div>
-
-            `;
-
-        }else{
-
-            box.innerHTML = `
-
-            <div class="panel">
-
-                <div class="table-wrap">
-
-                    <table>
-
-                        <thead>
-
-                            <tr>
-
-                                <th>
-                                    Applicant
-                                </th>
-
-                                <th>
-                                    Job
-                                </th>
-
-                                <th>
-                                    Email
-                                </th>
-
-                                <th>
-                                    Phone
-                                </th>
-
-                                <th>
-                                    Date
-                                </th>
-
-                                <th>
-                                    Status
-                                </th>
-
-                            </tr>
-
-                        </thead>
-
-
-                        <tbody>
-
-                            ${
-                                rows.map(function(a){
-
-                                    return `
-
-                                    <tr>
-
-                                        <td>
-                                            <b>
-                                                ${esc(
-                                                    a.applicant_name
-                                                )}
-                                            </b>
-                                        </td>
-
-                                        <td>
-                                            ${esc(a.title)}
-                                        </td>
-
-                                        <td>
-                                            ${esc(
-                                                a.applicant_email
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            ${esc(
-                                                a.applicant_phone ||
-                                                "-"
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            ${fmtDate(
-                                                a.created_at
-                                            )}
-                                        </td>
-
-                                        <td>
-
-                                            <select
-                                                class="select"
-                                                style="width:auto"
-                                                onchange="
-                                                changeStatus(
-                                                    ${a.id},
-                                                    this.value
-                                                )">
-
-                                                ${
-                                                    [
-                                                        "applied",
-                                                        "viewed",
-                                                        "shortlisted",
-                                                        "rejected",
-                                                        "selected"
-                                                    ].map(function(s){
-
-                                                        return `
-                                                        <option
-                                                            value="${s}"
-                                                            ${
-                                                                a.status === s
-                                                                ?
-                                                                "selected"
-                                                                :
-                                                                ""
-                                                            }>
-
-                                                            ${s}
-
-                                                        </option>
-                                                        `;
-
-                                                    }).join("")
-                                                }
-
-                                            </select>
-
-                                        </td>
-
-                                    </tr>
-
-                                    `;
-
-                                }).join("")
-                            }
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-
-            </div>
-
-            `;
-
-        }
-
+        `;
     }catch(error){
-
-        box.innerHTML =
-            `<div class="empty">
-                ${esc(error.message)}
-            </div>`;
-
+        toast(error.message,true);
     }
-
 }
 
 
-async function changeStatus(
-    id,
-    status
-){
-
+async function changeApplicationStatus(id,status){
     try{
-
-        await api(
-            "/api/applications/" +
-            id +
-            "/status",
+        const data = await api(
+            `/api/applications/${id}/status`,
             {
                 method:"PUT",
-                body:{
-                    status
-                }
+                body:{status}
             }
         );
-
-        alert(
-            "Application status updated."
-        );
-
-        showApplications();
-
+        toast(data.message);
+        await updateNotificationBadge();
     }catch(error){
-
-        alert(error.message);
-
+        toast(error.message,true);
     }
-
 }
 
 
-/* =====================================================
-   NOTIFICATIONS
-===================================================== */
-
-async function showNotifications(){
-
-    if(!me){
-
+function renderProfile(){
+    if(!state.user){
         showLogin();
         return;
-
     }
 
-    closeSidebar();
+    const u = state.user;
 
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Notifications
-                </h1>
-
-                <p>
-                    Your latest updates
-                </p>
-
-            </div>
-
-
-            <button
-                class="btn btn-outline btn-small"
-                onclick="markNotificationsRead()">
-
-                Mark all as read
-
-            </button>
-
+    document.getElementById("app").innerHTML = `
+        <div class="section-head">
+            <h2>My Profile</h2>
         </div>
 
+        <form class="card form-card"
+              onsubmit="saveProfile(event)">
 
-        <div
-            id="notificationResults">
+            <div class="form-grid">
 
-        </div>
-
-    </main>
-
-    `,"notifications");
-
-
-    const box =
-        document.getElementById(
-            "notificationResults"
-        );
-
-    try{
-
-        const data =
-            await api(
-                "/api/notifications"
-            );
-
-        const rows =
-            data.notifications || [];
-
-        box.innerHTML =
-            rows.length
-            ?
-            rows.map(function(n){
-
-                return `
-
-                <div
-                    class="panel"
-                    style="${
-                        n.is_read
-                        ?
-                        ""
-                        :
-                        "border-left:3px solid var(--blue)"
-                    }">
-
-                    <div
-                        style="
-                        display:flex;
-                        gap:12px">
-
-                        <div class="company-icon">
-                            ♧
-                        </div>
-
-                        <div>
-
-                            <b>
-                                ${esc(n.title)}
-                            </b>
-
-                            <div
-                                class="muted"
-                                style="margin-top:5px">
-
-                                ${esc(n.message)}
-
-                            </div>
-
-                            <div
-                                class="muted"
-                                style="margin-top:7px">
-
-                                ${fmtDate(
-                                    n.created_at
-                                )}
-
-                            </div>
-
-                        </div>
-
-                    </div>
-
+                <div class="form-group full">
+                    <label>Name *</label>
+                    <input id="pName"
+                           class="field"
+                           required
+                           maxlength="100"
+                           value="${escapeHtml(u.name)}">
                 </div>
 
-                `;
-
-            }).join("")
-            :
-            `
-            <div class="empty">
-                No notifications yet.
-            </div>
-            `;
-
-    }catch(error){
-
-        box.innerHTML =
-            `<div class="empty">
-                ${esc(error.message)}
-            </div>`;
-
-    }
-
-}
-
-
-async function markNotificationsRead(){
-
-    try{
-
-        await api(
-            "/api/notifications/read",
-            {
-                method:"POST"
-            }
-        );
-
-        showNotifications();
-
-    }catch(error){
-
-        alert(error.message);
-
-    }
-
-}
-
-
-/* =====================================================
-   POST JOB
-===================================================== */
-
-function showPostJob(){
-
-    if(
-        !me ||
-        ![
-            "employer",
-            "admin"
-        ].includes(me.role)
-    ){
-
-        showLogin();
-        return;
-
-    }
-
-    closeSidebar();
-
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Post a New Job
-                </h1>
-
-                <p>
-                    Reach candidates looking
-                    for their next opportunity
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div class="panel form-panel">
-
-            <div
-                id="postMsg"
-                class="msg">
-            </div>
-
-
-            <div class="form-row">
-
-                <div class="form-field">
-
-                    <label>
-                        Job Title *
-                    </label>
-
-                    <input
-                        id="jTitle"
-                        class="field"
-                        placeholder="Backend Developer"
-                    >
-
+                <div class="form-group">
+                    <label>Email</label>
+                    <input class="field"
+                           disabled
+                           value="${escapeHtml(u.email)}">
                 </div>
 
+                <div class="form-group">
+                    <label>Phone</label>
+                    <input id="pPhone"
+                           class="field"
+                           maxlength="30"
+                           value="${escapeHtml(u.phone)}">
+                </div>
 
-                <div class="form-field">
+                <div class="form-group">
+                    <label>Country</label>
+                    <input id="pCountry"
+                           class="field"
+                           maxlength="80"
+                           value="${escapeHtml(u.country)}">
+                </div>
 
-                    <label>
-                        Company *
-                    </label>
+                <div class="form-group">
+                    <label>City</label>
+                    <input id="pCity"
+                           class="field"
+                           maxlength="100"
+                           value="${escapeHtml(u.city)}">
+                </div>
 
-                    <input
-                        id="jCompany"
-                        class="field"
-                        value="${esc(me.name)}"
-                    >
-
+                <div class="form-group full">
+                    <label>Bio</label>
+                    <textarea id="pBio"
+                              class="textarea"
+                              maxlength="1000">${escapeHtml(u.bio)}</textarea>
                 </div>
 
             </div>
 
-
-            <div class="form-row">
-
-                <div class="form-field">
-
-                    <label>
-                        Category *
-                    </label>
-
-                    <select
-                        id="jCategory"
-                        class="select">
-
-                        <option>
-                            IT & Software
-                        </option>
-
-                        <option>
-                            Design
-                        </option>
-
-                        <option>
-                            Marketing
-                        </option>
-
-                        <option>
-                            Sales
-                        </option>
-
-                        <option>
-                            Finance
-                        </option>
-
-                        <option>
-                            HR
-                        </option>
-
-                        <option>
-                            Engineering
-                        </option>
-
-                        <option>
-                            Customer Support
-                        </option>
-
-                    </select>
-
-                </div>
-
-
-                <div class="form-field">
-
-                    <label>
-                        Country *
-                    </label>
-
-                    <select
-                        id="jCountry"
-                        class="select">
-
-                        <option>
-                            India
-                        </option>
-
-                        <option>
-                            USA
-                        </option>
-
-                        <option>
-                            UAE
-                        </option>
-
-                        <option>
-                            UK
-                        </option>
-
-                        <option>
-                            Other
-                        </option>
-
-                    </select>
-
-                </div>
-
-            </div>
-
-
-            <div class="form-row">
-
-                <div class="form-field">
-
-                    <label>
-                        Job Type *
-                    </label>
-
-                    <select
-                        id="jType"
-                        class="select">
-
-                        <option>
-                            Full-time
-                        </option>
-
-                        <option>
-                            Part-time
-                        </option>
-
-                        <option>
-                            Contract
-                        </option>
-
-                        <option>
-                            Freelance
-                        </option>
-
-                    </select>
-
-                </div>
-
-
-                <div class="form-field">
-
-                    <label>
-                        Work Mode *
-                    </label>
-
-                    <select
-                        id="jMode"
-                        class="select">
-
-                        <option>
-                            Remote
-                        </option>
-
-                        <option>
-                            Onsite
-                        </option>
-
-                        <option>
-                            Hybrid
-                        </option>
-
-                    </select>
-
-                </div>
-
-            </div>
-
-
-            <div class="form-row">
-
-                <div class="form-field">
-
-                    <label>
-                        Location
-                    </label>
-
-                    <input
-                        id="jLocation"
-                        class="field"
-                        placeholder="Hyderabad"
-                    >
-
-                </div>
-
-
-                <div class="form-field">
-
-                    <label>
-                        Salary
-                    </label>
-
-                    <input
-                        id="jSalary"
-                        class="field"
-                        placeholder="₹5,00,000 - ₹8,00,000 / year"
-                    >
-
-                </div>
-
-            </div>
-
-
-            <div class="form-field">
-
-                <label>
-                    Skills
-                </label>
-
-                <input
-                    id="jSkills"
-                    class="field"
-                    placeholder="Python, FastAPI, SQL, PostgreSQL"
-                >
-
-            </div>
-
-
-            <div class="form-field">
-
-                <label>
-                    Application Email
-                </label>
-
-                <input
-                    id="jEmail"
-                    class="field"
-                    type="email"
-                    placeholder="hr@company.com"
-                >
-
-            </div>
-
-
-            <div class="form-field">
-
-                <label>
-                    Description *
-                </label>
-
-                <textarea
-                    id="jDescription"
-                    placeholder="
-                    Describe the role,
-                    responsibilities and requirements...
-                    "></textarea>
-
-            </div>
-
-
-            <button
-                class="btn btn-primary full"
-                onclick="postJob()">
-
-                Post Job
-
-            </button>
-
-        </div>
-
-    </main>
-
-    `,"post");
-
-}
-
-
-async function postJob(){
-
-    const msg =
-        document.getElementById(
-            "postMsg"
-        );
-
-    msg.className = "msg";
-    msg.textContent = "";
-
-    try{
-
-        await api(
-            "/api/jobs",
-            {
-                method:"POST",
-                body:{
-
-                    title:
-                        document
-                        .getElementById(
-                            "jTitle"
-                        )
-                        .value
-                        .trim(),
-
-                    company:
-                        document
-                        .getElementById(
-                            "jCompany"
-                        )
-                        .value
-                        .trim(),
-
-                    category:
-                        document
-                        .getElementById(
-                            "jCategory"
-                        )
-                        .value,
-
-                    country:
-                        document
-                        .getElementById(
-                            "jCountry"
-                        )
-                        .value,
-
-                    location:
-                        document
-                        .getElementById(
-                            "jLocation"
-                        )
-                        .value
-                        .trim(),
-
-                    job_type:
-                        document
-                        .getElementById(
-                            "jType"
-                        )
-                        .value,
-
-                    work_mode:
-                        document
-                        .getElementById(
-                            "jMode"
-                        )
-                        .value,
-
-                    salary:
-                        document
-                        .getElementById(
-                            "jSalary"
-                        )
-                        .value
-                        .trim(),
-
-                    skills:
-                        document
-                        .getElementById(
-                            "jSkills"
-                        )
-                        .value
-                        .trim(),
-
-                    application_email:
-                        document
-                        .getElementById(
-                            "jEmail"
-                        )
-                        .value
-                        .trim(),
-
-                    description:
-                        document
-                        .getElementById(
-                            "jDescription"
-                        )
-                        .value
-                        .trim()
-
-                }
-            }
-        );
-
-        msg.className =
-            "msg ok";
-
-        msg.textContent =
-            "Job posted successfully!";
-
-        setTimeout(
-            showJobs,
-            700
-        );
-
-    }catch(error){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            error.message;
-
-    }
-
-}
-
-
-/* =====================================================
-   PROFILE
-===================================================== */
-
-async function showProfile(){
-
-    if(!me){
-
-        showLogin();
-        return;
-
-    }
-
-    closeSidebar();
-
-    shell(`
-
-    <main class="page">
-
-        <div class="page-title">
-
-            <div>
-
-                <h1>
-                    Profile
-                </h1>
-
-                <p>
-                    Manage your Job Mart profile
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div class="profile-grid">
-
-            <div class="panel profile-box">
-
-                <div class="profile-avatar">
-
-                    ${esc(initials(me.name))}
-
-                </div>
-
-                <h3>
-                    ${esc(me.name)}
-                </h3>
-
-                <div class="muted">
-
-                    ${
-                        me.role === "employer"
-                        ?
-                        "Employer / Recruiter"
-                        :
-                        "Job Seeker"
-                    }
-
-                </div>
-
-                <div
-                    class="muted"
-                    style="margin-top:8px">
-
-                    ${esc(me.email)}
-
-                </div>
-
-            </div>
-
-
-            <div class="panel">
-
-                <div
-                    id="profileMsg"
-                    class="msg">
-                </div>
-
-
-                <div class="form-row">
-
-                    <div class="form-field">
-
-                        <label>
-                            Full Name
-                        </label>
-
-                        <input
-                            id="pName"
-                            class="field"
-                            value="${esc(me.name)}"
-                        >
-
-                    </div>
-
-
-                    <div class="form-field">
-
-                        <label>
-                            Country
-                        </label>
-
-                        <input
-                            id="pCountry"
-                            class="field"
-                            value="${esc(me.country)}"
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-row">
-
-                    <div class="form-field">
-
-                        <label>
-                            Email
-                        </label>
-
-                        <input
-                            class="field"
-                            value="${esc(me.email)}"
-                            disabled
-                        >
-
-                    </div>
-
-
-                    <div class="form-field">
-
-                        <label>
-                            City
-                        </label>
-
-                        <input
-                            id="pCity"
-                            class="field"
-                            value="${esc(me.city)}"
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-row">
-
-                    <div class="form-field">
-
-                        <label>
-                            Phone
-                        </label>
-
-                        <input
-                            id="pPhone"
-                            class="field"
-                            value="${esc(me.phone)}"
-                        >
-
-                    </div>
-
-
-                    <div class="form-field">
-
-                        <label>
-                            Account Type
-                        </label>
-
-                        <input
-                            class="field"
-                            value="${esc(me.role)}"
-                            disabled
-                        >
-
-                    </div>
-
-                </div>
-
-
-                <div class="form-field">
-
-                    <label>
-                        Bio
-                    </label>
-
-                    <textarea id="pBio">${esc(me.bio)}</textarea>
-
-                </div>
-
-
-                <button
-                    class="btn btn-primary"
-                    onclick="updateProfile()">
-
-                    Update Profile
-
+            <div class="card-actions">
+                <button class="btn btn-primary" type="submit">
+                    Save Profile
                 </button>
-
             </div>
-
-        </div>
-
-    </main>
-
-    `,"profile");
-
+        </form>
+    `;
 }
 
 
-async function updateProfile(){
-
-    const msg =
-        document.getElementById(
-            "profileMsg"
-        );
+async function saveProfile(event){
+    event.preventDefault();
 
     try{
-
-        await api(
+        const data = await api(
             "/api/profile",
             {
                 method:"PUT",
                 body:{
-
-                    name:
-                        document
-                        .getElementById(
-                            "pName"
-                        )
-                        .value
-                        .trim(),
-
-                    phone:
-                        document
-                        .getElementById(
-                            "pPhone"
-                        )
-                        .value
-                        .trim(),
-
-                    country:
-                        document
-                        .getElementById(
-                            "pCountry"
-                        )
-                        .value
-                        .trim(),
-
-                    city:
-                        document
-                        .getElementById(
-                            "pCity"
-                        )
-                        .value
-                        .trim(),
-
-                    bio:
-                        document
-                        .getElementById(
-                            "pBio"
-                        )
-                        .value
-                        .trim()
-
+                    name:document.getElementById("pName").value,
+                    phone:document.getElementById("pPhone").value,
+                    country:document.getElementById("pCountry").value,
+                    city:document.getElementById("pCity").value,
+                    bio:document.getElementById("pBio").value
                 }
             }
         );
 
-        await loadMe();
-
-        msg.className =
-            "msg ok";
-
-        msg.textContent =
-            "Profile updated successfully.";
-
-        setTimeout(
-            showProfile,
-            500
-        );
-
+        state.user = data.user;
+        updateHeader();
+        toast(data.message);
     }catch(error){
-
-        msg.className =
-            "msg error";
-
-        msg.textContent =
-            error.message;
-
+        toast(error.message,true);
     }
-
 }
 
 
-/* =====================================================
-   LOGOUT
-===================================================== */
+function renderPassword(){
+    if(!state.user){
+        showLogin();
+        return;
+    }
 
-async function doLogout(){
+    document.getElementById("app").innerHTML = `
+        <div class="section-head">
+            <h2>Change Password</h2>
+        </div>
+
+        <form class="card form-card"
+              onsubmit="changePassword(event)">
+
+            <div class="form-group">
+                <label>Current Password</label>
+                <input id="oldPassword"
+                       class="field"
+                       type="password"
+                       required>
+            </div>
+
+            <div class="form-group" style="margin-top:14px">
+                <label>New Password</label>
+                <input id="newPassword"
+                       class="field"
+                       type="password"
+                       minlength="6"
+                       required>
+            </div>
+
+            <div class="card-actions">
+                <button class="btn btn-primary">
+                    Change Password
+                </button>
+            </div>
+        </form>
+    `;
+}
+
+
+async function changePassword(event){
+    event.preventDefault();
 
     try{
-
-        await api(
-            "/api/logout",
+        const data = await api(
+            "/api/password",
             {
-                method:"POST"
+                method:"PUT",
+                body:{
+                    current_password:
+                        document.getElementById("oldPassword").value,
+                    new_password:
+                        document.getElementById("newPassword").value
+                }
             }
         );
 
-    }catch(error){}
-
-    me = null;
-
-    renderPublicHome();
-
+        toast(data.message);
+        setTimeout(() => {
+            state.user = null;
+            updateHeader();
+            go("home");
+            showLogin();
+        },700);
+    }catch(error){
+        toast(error.message,true);
+    }
 }
 
 
-/* =====================================================
-   LOAD USER
-===================================================== */
+function renderSettings(){
+    document.getElementById("app").innerHTML = `
+        <div class="section-head">
+            <h2>Settings</h2>
+        </div>
 
-async function loadMe(){
+        <div class="card form-card">
+            <h3>Job Mart Settings</h3>
+            <p style="color:#68758a">
+                Your account, profile and notifications can be managed
+                from the menu.
+            </p>
+
+            <div class="card-actions">
+                <button class="btn btn-secondary"
+                        onclick="go('profile')">
+                    Profile
+                </button>
+
+                <button class="btn btn-secondary"
+                        onclick="go('password')">
+                    Change Password
+                </button>
+
+                <button class="btn btn-secondary"
+                        onclick="go('notifications')">
+                    Notifications
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+
+async function renderNotifications(){
+    if(!state.user){
+        showLogin();
+        return;
+    }
+
+    document.getElementById("app").innerHTML = `
+        <div class="section-head">
+            <h2>Notifications</h2>
+            <button class="btn btn-secondary"
+                    onclick="markAllRead()">
+                Mark all read
+            </button>
+        </div>
+
+        <div id="notificationsArea">
+            <div class="loading">Loading notifications...</div>
+        </div>
+    `;
 
     try{
+        const data = await api("/api/notifications");
+        const box = document.getElementById("notificationsArea");
 
-        const data =
-            await api(
-                "/api/me"
-            );
+        if(!data.notifications.length){
+            box.innerHTML = `
+                <div class="empty">
+                    No notifications yet.
+                </div>
+            `;
+            return;
+        }
 
-        me =
-            data.logged_in
-            ?
-            data.user
-            :
-            null;
+        box.innerHTML = data.notifications.map(n => `
+            <div class="card"
+                 style="padding:16px;margin-bottom:10px;
+                 ${n.is_read ? "" : "border-left:4px solid #0757c9;"}">
+                <div style="display:flex;
+                            justify-content:space-between;
+                            gap:15px">
+                    <div>
+                        <strong>${escapeHtml(n.title)}</strong>
+                        <p style="margin:7px 0;color:#68758a">
+                            ${escapeHtml(n.message)}
+                        </p>
+                        <small style="color:#8a95a5">
+                            ${formatDate(n.created_at)}
+                        </small>
+                    </div>
 
+                    ${
+                        !n.is_read
+                        ? `<button class="btn btn-secondary"
+                            onclick="markRead(${n.id})">
+                            Mark read
+                           </button>`
+                        : `<span class="tag">Read</span>`
+                    }
+                </div>
+            </div>
+        `).join("");
+
+        await updateNotificationBadge();
     }catch(error){
-
-        me = null;
-
+        document.getElementById("notificationsArea").innerHTML =
+            `<div class="empty">${escapeHtml(error.message)}</div>`;
     }
-
 }
 
 
-/* =====================================================
-   START
-===================================================== */
+async function markRead(id){
+    try{
+        await api(
+            `/api/notifications/${id}/read`,
+            {method:"POST"}
+        );
+        await renderNotifications();
+    }catch(error){
+        toast(error.message,true);
+    }
+}
 
-async function start(){
 
+async function markAllRead(){
+    try{
+        await api(
+            "/api/notifications/read-all",
+            {method:"POST"}
+        );
+        toast("Notifications marked as read");
+        await renderNotifications();
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+function showLogin(){
+    document.getElementById("modalRoot").innerHTML = `
+        <div class="modal">
+            <div class="modal-box">
+                <div class="modal-head">
+                    <h3>Login to Job Mart</h3>
+                    <button class="modal-close"
+                            onclick="closeModal()">×</button>
+                </div>
+
+                <div class="modal-body">
+                    <form onsubmit="login(event)">
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input id="loginEmail"
+                                   class="field"
+                                   type="email"
+                                   required>
+                        </div>
+
+                        <div class="form-group" style="margin-top:14px">
+                            <label>Password</label>
+                            <input id="loginPassword"
+                                   class="field"
+                                   type="password"
+                                   required>
+                        </div>
+
+                        <div class="card-actions"
+                             style="margin-top:15px">
+                            <button class="btn btn-primary">
+                                Login
+                            </button>
+
+                            <button type="button"
+                                    class="btn btn-outline"
+                                    onclick="showRegister()">
+                                Create Account
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+
+async function login(event){
+    event.preventDefault();
+
+    try{
+        const data = await api(
+            "/api/login",
+            {
+                method:"POST",
+                body:{
+                    email:document.getElementById("loginEmail").value,
+                    password:document.getElementById("loginPassword").value
+                }
+            }
+        );
+
+        state.user = data.user;
+        updateHeader();
+        closeModal();
+        toast(data.message);
+        go("home");
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+function showRegister(){
+    document.getElementById("modalRoot").innerHTML = `
+        <div class="modal">
+            <div class="modal-box">
+                <div class="modal-head">
+                    <h3>Create Job Mart Account</h3>
+                    <button class="modal-close"
+                            onclick="closeModal()">×</button>
+                </div>
+
+                <div class="modal-body">
+                    <form onsubmit="registerUser(event)">
+
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input id="regName"
+                                   class="field"
+                                   minlength="2"
+                                   maxlength="100"
+                                   required>
+                        </div>
+
+                        <div class="form-group" style="margin-top:12px">
+                            <label>Email</label>
+                            <input id="regEmail"
+                                   class="field"
+                                   type="email"
+                                   required>
+                        </div>
+
+                        <div class="form-group" style="margin-top:12px">
+                            <label>Password</label>
+                            <input id="regPassword"
+                                   class="field"
+                                   type="password"
+                                   minlength="6"
+                                   required>
+                        </div>
+
+                        <div class="form-group" style="margin-top:12px">
+                            <label>Account Type</label>
+                            <select id="regRole"
+                                    class="field">
+                                <option value="jobseeker">Jobseeker</option>
+                                <option value="employer">Employer</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group" style="margin-top:12px">
+                            <label>Phone</label>
+                            <input id="regPhone"
+                                   class="field"
+                                   maxlength="30">
+                        </div>
+
+                        <div class="form-grid"
+                             style="margin-top:12px">
+
+                            <div class="form-group">
+                                <label>Country</label>
+                                <input id="regCountry"
+                                       class="field"
+                                       maxlength="80">
+                            </div>
+
+                            <div class="form-group">
+                                <label>City</label>
+                                <input id="regCity"
+                                       class="field"
+                                       maxlength="100">
+                            </div>
+
+                        </div>
+
+                        <div class="card-actions"
+                             style="margin-top:16px">
+
+                            <button class="btn btn-primary">
+                                Register
+                            </button>
+
+                            <button type="button"
+                                    class="btn btn-outline"
+                                    onclick="showLogin()">
+                                Back to Login
+                            </button>
+
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+
+async function registerUser(event){
+    event.preventDefault();
+
+    try{
+        const data = await api(
+            "/api/register",
+            {
+                method:"POST",
+                body:{
+                    name:document.getElementById("regName").value,
+                    email:document.getElementById("regEmail").value,
+                    password:document.getElementById("regPassword").value,
+                    role:document.getElementById("regRole").value,
+                    phone:document.getElementById("regPhone").value,
+                    country:document.getElementById("regCountry").value,
+                    city:document.getElementById("regCity").value
+                }
+            }
+        );
+
+        toast(data.message);
+        showLogin();
+
+        document.getElementById("loginEmail").value =
+            document.getElementById("regEmail")?.value || "";
+    }catch(error){
+        toast(error.message,true);
+    }
+}
+
+
+async function logout(){
+    try{
+        await api(
+            "/api/logout",
+            {method:"POST"}
+        );
+    }catch(error){
+        // Logout locally even if the server is unavailable.
+    }
+
+    state.user = null;
+    updateHeader();
+    closeModal();
+    closeDrawer();
+    toast("Logged out");
+    go("home");
+}
+
+
+function formatDate(value){
+    if(!value) return "-";
+
+    try{
+        const date = new Date(value);
+        if(Number.isNaN(date.getTime())) return value;
+
+        return date.toLocaleString();
+    }catch(error){
+        return value;
+    }
+}
+
+
+async function boot(){
     await loadMe();
-
-    if(me){
-
-        showDashboard();
-
-    }else{
-
-        renderPublicHome();
-
-    }
-
+    go("home");
 }
 
 
-start();
-
+boot();
 </script>
 
 </body>
 </html>
 """
 
-
-# =========================================================
-# HTML ROUTES
-# =========================================================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -6267,6 +4388,6 @@ def home():
 def health():
     return {
         "ok": True,
-        "service": "Job Mart",
-        "version": "2.0"
+        "app": "Job Mart",
+        "version": "2.0.0"
     }
