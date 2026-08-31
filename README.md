@@ -1,2 +1,5 @@
-# job-mart
-Job Mart – Jobs, Recruitment and Services
+job-mart/
+├── main.py
+├── requirements.txt
+└── templates/
+    └── index.html
