@@ -1,4 +1,3 @@
-README.md
-job-mart-project.zip
-main.py
-requirements.txt   ✅
+fastapi
+uvicorn[standard]
+python-multipart
