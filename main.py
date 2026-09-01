@@ -1,50 +1,21 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from typing import Optional
+from datetime import datetime, timezone
 import sqlite3
 import hashlib
 import secrets
+import html
 import re
 
 # =========================================================
-# JOB MART
+# JOB MART - COMPLETE SINGLE FILE APPLICATION
 # =========================================================
 
-app = FastAPI(title="Job Mart", version="2.0")
+app = FastAPI(title="Job Mart")
 
 DB_FILE = Path("job_mart.db")
-
-SESSIONS = {}
-OTPS = {}
-
-COUNTRIES = [
-    "India",
-    "United States",
-    "United Kingdom",
-    "Canada",
-    "Australia",
-    "Germany",
-    "UAE",
-    "Singapore",
-    "Other",
-]
-
-JOB_TYPES = [
-    "Full-time",
-    "Part-time",
-    "Contract",
-    "Internship",
-    "Freelance",
-]
-
-WORK_MODES = [
-    "On-site",
-    "Hybrid",
-    "Remote",
-]
-
 
 # =========================================================
 # DATABASE
@@ -53,7 +24,7 @@ WORK_MODES = [
 def db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -69,14 +40,23 @@ def init_db():
         role TEXT NOT NULL DEFAULT 'jobseeker',
         phone TEXT DEFAULT '',
         location TEXT DEFAULT '',
-        bio TEXT DEFAULT '',
-        skills TEXT DEFAULT '',
-        experience TEXT DEFAULT '',
-        education TEXT DEFAULT '',
-        resume TEXT DEFAULT '',
-        company_name TEXT DEFAULT '',
-        company_description TEXT DEFAULT '',
         created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS otps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        otp TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS jobs (
@@ -88,31 +68,13 @@ def init_db():
         skills TEXT DEFAULT '',
         country TEXT DEFAULT 'India',
         location TEXT DEFAULT '',
-        job_type TEXT DEFAULT 'Full-time',
-        work_mode TEXT DEFAULT 'On-site',
-        salary_min INTEGER DEFAULT 0,
-        salary_max INTEGER DEFAULT 0,
+        job_type TEXT DEFAULT 'Full Time',
+        salary TEXT DEFAULT '',
         experience TEXT DEFAULT '',
         education TEXT DEFAULT '',
-        openings INTEGER DEFAULT 1,
         status TEXT DEFAULT 'active',
         created_at TEXT NOT NULL,
-        FOREIGN KEY(employer_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS saved_jobs (
-        user_id INTEGER NOT NULL,
-        job_id INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY(user_id, job_id),
-        FOREIGN KEY(user_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE,
-        FOREIGN KEY(job_id)
-            REFERENCES jobs(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(employer_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS applications (
@@ -120,19 +82,11 @@ def init_db():
         job_id INTEGER NOT NULL,
         user_id INTEGER NOT NULL,
         cover_letter TEXT DEFAULT '',
-        resume TEXT DEFAULT '',
         status TEXT DEFAULT 'Applied',
         created_at TEXT NOT NULL,
-
         UNIQUE(job_id, user_id),
-
-        FOREIGN KEY(job_id)
-            REFERENCES jobs(id)
-            ON DELETE CASCADE,
-
-        FOREIGN KEY(user_id)
-            REFERENCES users(id)
-            ON DELETE CASCADE
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     """)
 
@@ -142,765 +96,2497 @@ def init_db():
 
 init_db()
 
-
 # =========================================================
 # HELPERS
 # =========================================================
 
-def now():
+def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def clean_email(email):
-    return email.strip().lower()
-
-
-def valid_email(email):
-    return bool(
-        re.fullmatch(
-            r"[^@\s]+@[^@\s]+\.[^@\s]+",
-            email
-        )
-    )
-
-
-def hash_password(password):
-    salt = secrets.token_hex(16)
-
-    digest = hashlib.pbkdf2_hmac(
+def password_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    hashed = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode(),
-        salt.encode(),
-        180000
-    ).hex()
+        salt,
+        200_000
+    )
+    return salt.hex() + ":" + hashed.hex()
 
-    return salt + "$" + digest
 
-
-def verify_password(password, stored):
+def password_verify(password: str, stored: str) -> bool:
     try:
-        salt, digest = stored.split("$", 1)
+        salt_hex, hash_hex = stored.split(":")
+        salt = bytes.fromhex(salt_hex)
 
-        check = hashlib.pbkdf2_hmac(
+        hashed = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode(),
-            salt.encode(),
-            180000
-        ).hex()
-
-        return secrets.compare_digest(
-            check,
-            digest
+            salt,
+            200_000
         )
 
+        return secrets.compare_digest(
+            hashed.hex(),
+            hash_hex
+        )
     except Exception:
         return False
 
 
-def get_user_by_email(email):
-    conn = db()
-
-    row = conn.execute(
-        "SELECT * FROM users WHERE email=?",
-        (clean_email(email),)
-    ).fetchone()
-
-    conn.close()
-
-    return row
+def clean(value: str) -> str:
+    return html.escape((value or "").strip())
 
 
-def get_user_by_id(user_id):
-    conn = db()
-
-    row = conn.execute(
-        "SELECT * FROM users WHERE id=?",
-        (user_id,)
-    ).fetchone()
-
-    conn.close()
-
-    return row
+def valid_email(email: str) -> bool:
+    return re.match(
+        r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+        email
+    ) is not None
 
 
-def public_user(row):
-    if not row:
-        return None
-
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "email": row["email"],
-        "role": row["role"],
-        "phone": row["phone"],
-        "location": row["location"],
-        "bio": row["bio"],
-        "skills": row["skills"],
-        "experience": row["experience"],
-        "education": row["education"],
-        "resume": row["resume"],
-        "company_name": row["company_name"],
-        "company_description": row["company_description"],
-        "created_at": row["created_at"],
-    }
-
-
-def create_session(user_id):
-    token = secrets.token_urlsafe(32)
-
-    SESSIONS[token] = {
-        "user_id": user_id,
-        "created_at": now()
-    }
-
-    return token
-
-
-def current_user(request: Request):
-
-    token = (
-        request.headers.get("X-Session-Token")
-        or request.cookies.get("jobmart_session")
-    )
+def get_user(request: Request):
+    token = request.cookies.get("jobmart_session")
 
     if not token:
         return None
 
-    session = SESSIONS.get(token)
+    conn = db()
 
-    if not session:
-        return None
+    row = conn.execute("""
+        SELECT users.*
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token = ?
+    """, (token,)).fetchone()
 
-    return get_user_by_id(
-        session["user_id"]
+    conn.close()
+
+    return row
+
+
+def create_session(user_id: int):
+    token = secrets.token_urlsafe(48)
+
+    conn = db()
+
+    conn.execute(
+        "INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
+        (token, user_id, now_iso())
+    )
+
+    conn.commit()
+    conn.close()
+
+    return token
+
+
+def logout_session(request: Request):
+    token = request.cookies.get("jobmart_session")
+
+    if token:
+        conn = db()
+        conn.execute(
+            "DELETE FROM sessions WHERE token=?",
+            (token,)
+        )
+        conn.commit()
+        conn.close()
+
+
+def create_otp(email: str, purpose: str):
+    otp = str(secrets.randbelow(900000) + 100000)
+
+    expires = int(datetime.now(timezone.utc).timestamp()) + 600
+
+    conn = db()
+
+    conn.execute(
+        """
+        UPDATE otps
+        SET used=1
+        WHERE email=? AND purpose=? AND used=0
+        """,
+        (email, purpose)
+    )
+
+    conn.execute(
+        """
+        INSERT INTO otps(email,otp,purpose,expires_at)
+        VALUES(?,?,?,?)
+        """,
+        (email, otp, purpose, expires)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return otp
+
+
+def verify_otp(email: str, otp: str, purpose: str):
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+
+    conn = db()
+
+    row = conn.execute(
+        """
+        SELECT *
+        FROM otps
+        WHERE email=?
+        AND otp=?
+        AND purpose=?
+        AND used=0
+        AND expires_at>?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (email, otp, purpose, timestamp)
+    ).fetchone()
+
+    if row:
+        conn.execute(
+            "UPDATE otps SET used=1 WHERE id=?",
+            (row["id"],)
+        )
+        conn.commit()
+
+    conn.close()
+
+    return row is not None
+
+
+def redirect_login(message: str = ""):
+    url = "/login"
+
+    if message:
+        url += "?msg=" + message
+
+    return RedirectResponse(
+        url=url,
+        status_code=303
     )
 
 
-def require_user(request):
-    user = current_user(request)
+# =========================================================
+# HTML / UI
+# =========================================================
 
-    if not user:
-        raise HTTPException(
-            401,
-            "Please login first"
-        )
+CSS = """
+<style>
+*{
+    box-sizing:border-box;
+}
 
-    return user
+body{
+    margin:0;
+    font-family:Arial,Helvetica,sans-serif;
+    background:#f3f6fb;
+    color:#182033;
+}
 
+a{
+    color:inherit;
+    text-decoration:none;
+}
 
-def job_json(row, saved=False, applied=False):
+.topbar{
+    background:#1976ed;
+    color:white;
+    position:sticky;
+    top:0;
+    z-index:20;
+    box-shadow:0 3px 12px rgba(0,0,0,.16);
+}
 
-    return {
-        "id": row["id"],
-        "employer_id": row["employer_id"],
-        "title": row["title"],
-        "company": row["company"],
-        "description": row["description"],
-        "skills": row["skills"],
-        "country": row["country"],
-        "location": row["location"],
-        "job_type": row["job_type"],
-        "work_mode": row["work_mode"],
-        "salary_min": row["salary_min"],
-        "salary_max": row["salary_max"],
-        "experience": row["experience"],
-        "education": row["education"],
-        "openings": row["openings"],
-        "status": row["status"],
-        "created_at": row["created_at"],
-        "saved": bool(saved),
-        "applied": bool(applied),
+.nav{
+    max-width:1150px;
+    margin:auto;
+    padding:12px 18px;
+    display:flex;
+    align-items:center;
+    gap:15px;
+}
+
+.logo{
+    font-size:30px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.tagline{
+    font-size:14px;
+    opacity:.9;
+}
+
+.spacer{
+    flex:1;
+}
+
+.navbtn{
+    background:white;
+    color:#1769d5;
+    border:0;
+    padding:12px 20px;
+    border-radius:8px;
+    font-size:17px;
+    cursor:pointer;
+    font-weight:600;
+}
+
+.navlink{
+    padding:10px 12px;
+    border-radius:7px;
+}
+
+.navlink:hover{
+    background:rgba(255,255,255,.15);
+}
+
+.searchbar{
+    background:#1976ed;
+    padding:0 18px 15px;
+}
+
+.search-inner{
+    max-width:1150px;
+    margin:auto;
+    display:flex;
+    gap:10px;
+}
+
+.search-inner input{
+    flex:1;
+}
+
+.search-button{
+    width:80px;
+    font-size:25px;
+}
+
+.container{
+    max-width:1150px;
+    margin:35px auto;
+    padding:0 18px;
+}
+
+.card{
+    background:white;
+    border-radius:18px;
+    padding:30px;
+    box-shadow:0 2px 10px rgba(0,0,0,.08);
+    margin-bottom:25px;
+}
+
+.hero{
+    padding:45px;
+}
+
+.hero h1{
+    font-size:52px;
+    line-height:1.1;
+    margin:0 0 20px;
+}
+
+.hero p{
+    font-size:20px;
+    color:#59657a;
+}
+
+h1,h2,h3{
+    margin-top:0;
+}
+
+input,
+select,
+textarea{
+    width:100%;
+    padding:15px;
+    border:1px solid #cbd2dc;
+    border-radius:9px;
+    font-size:17px;
+    outline:none;
+    background:white;
+}
+
+input:focus,
+select:focus,
+textarea:focus{
+    border-color:#1976ed;
+    box-shadow:0 0 0 3px rgba(25,118,237,.1);
+}
+
+textarea{
+    min-height:130px;
+    resize:vertical;
+}
+
+label{
+    display:block;
+    font-weight:600;
+    margin:16px 0 7px;
+}
+
+.btn{
+    display:inline-block;
+    border:0;
+    border-radius:8px;
+    padding:13px 20px;
+    background:#1976ed;
+    color:white;
+    font-size:17px;
+    cursor:pointer;
+    font-weight:600;
+}
+
+.btn:hover{
+    background:#1264ca;
+}
+
+.btn.secondary{
+    background:#eef3fb;
+    color:#2467bc;
+}
+
+.btn.danger{
+    background:#d9363e;
+}
+
+.btn.success{
+    background:#168a55;
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:20px;
+}
+
+.job-grid{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:20px;
+}
+
+.job{
+    background:white;
+    border-radius:15px;
+    padding:24px;
+    box-shadow:0 2px 9px rgba(0,0,0,.08);
+}
+
+.job h3{
+    color:#155db7;
+    font-size:24px;
+    margin-bottom:8px;
+}
+
+.company{
+    font-weight:700;
+    font-size:17px;
+}
+
+.meta{
+    color:#687386;
+    margin:8px 0;
+}
+
+.badge{
+    display:inline-block;
+    padding:6px 10px;
+    background:#eaf2ff;
+    color:#1769d5;
+    border-radius:20px;
+    margin:3px;
+    font-size:14px;
+}
+
+.alert{
+    padding:15px;
+    border-radius:10px;
+    margin-bottom:18px;
+    background:#fff0f0;
+    color:#bd3030;
+}
+
+.success-alert{
+    background:#edfff5;
+    color:#137846;
+}
+
+.empty{
+    text-align:center;
+    padding:55px 20px;
+    color:#687386;
+}
+
+footer{
+    text-align:center;
+    color:#687386;
+    padding:40px 15px;
+}
+
+.auth-card{
+    max-width:650px;
+    margin:35px auto;
+}
+
+.tabs{
+    display:flex;
+    gap:10px;
+    margin-bottom:25px;
+}
+
+.tab{
+    flex:1;
+    padding:15px;
+    border:1px solid #ccd3df;
+    background:white;
+    border-radius:8px;
+    text-align:center;
+    font-size:18px;
+}
+
+.tab.active{
+    background:#1976ed;
+    color:white;
+}
+
+.profile{
+    display:flex;
+    gap:25px;
+    align-items:center;
+}
+
+.avatar{
+    width:75px;
+    height:75px;
+    border-radius:50%;
+    background:#1976ed;
+    color:white;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    font-size:30px;
+    font-weight:bold;
+}
+
+.stat-grid{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:15px;
+}
+
+.stat{
+    background:#f5f8fd;
+    border-radius:12px;
+    padding:20px;
+}
+
+.stat strong{
+    display:block;
+    font-size:30px;
+    color:#1976ed;
+}
+
+@media(max-width:700px){
+    .nav{
+        flex-wrap:wrap;
     }
 
+    .logo{
+        font-size:27px;
+    }
+
+    .tagline{
+        display:none;
+    }
+
+    .navlink{
+        display:none;
+    }
+
+    .hero{
+        padding:28px;
+    }
+
+    .hero h1{
+        font-size:40px;
+    }
+
+    .card{
+        padding:22px;
+    }
+
+    .grid,
+    .job-grid{
+        grid-template-columns:1fr;
+    }
+
+    .search-inner{
+        flex-direction:row;
+    }
+
+    .search-button{
+        width:70px;
+    }
+
+    .stat-grid{
+        grid-template-columns:1fr;
+    }
+}
+</style>
+"""
+
+
+def layout(
+    title: str,
+    body: str,
+    user=None,
+    search_value: str = ""
+):
+    if user:
+        nav = f"""
+        <a class="navlink" href="/dashboard">Dashboard</a>
+        <a class="navlink" href="/jobs">Jobs</a>
+        <a class="navlink" href="/applications">Applications</a>
+        <a class="navlink" href="/post-job">Post Job</a>
+        <form method="post" action="/logout" style="margin:0">
+            <button class="navbtn">Logout</button>
+        </form>
+        """
+    else:
+        nav = """
+        <a class="navlink" href="/jobs">Jobs</a>
+        <a class="navlink" href="/login">Login</a>
+        <a class="navbtn" href="/register">Create Account</a>
+        """
+
+    return f"""
+    <!doctype html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport"
+              content="width=device-width,initial-scale=1">
+        <title>{html.escape(title)} - Job Mart</title>
+        {CSS}
+    </head>
+
+    <body>
+
+    <header class="topbar">
+
+        <div class="nav">
+
+            <a href="/" class="logo">Job Mart</a>
+
+            <span class="tagline">
+                Find • Apply • Grow
+            </span>
+
+            <div class="spacer"></div>
+
+            {nav}
+
+        </div>
+
+        <div class="searchbar">
+
+            <form
+                method="get"
+                action="/jobs"
+                class="search-inner"
+            >
+
+                <input
+                    name="q"
+                    value="{html.escape(search_value)}"
+                    placeholder="Search jobs, companies, skills..."
+                >
+
+                <button
+                    class="btn search-button"
+                    type="submit"
+                >
+                    🔍
+                </button>
+
+            </form>
+
+        </div>
+
+    </header>
+
+    <main class="container">
+
+        {body}
+
+    </main>
+
+    <footer>
+        Job Mart • Find jobs • Apply online • Build your career
+    </footer>
+
+    </body>
+    </html>
+    """
+
 
 # =========================================================
-# MODELS
+# HOME
 # =========================================================
 
-class RegisterIn(BaseModel):
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    user = get_user(request)
 
-    name: str = Field(
-        min_length=2,
-        max_length=100
+    conn = db()
+
+    jobs = conn.execute("""
+        SELECT *
+        FROM jobs
+        WHERE status='active'
+        ORDER BY id DESC
+        LIMIT 6
+    """).fetchall()
+
+    conn.close()
+
+    job_html = ""
+
+    for job in jobs:
+        job_html += job_card(job)
+
+    if not job_html:
+        job_html = """
+        <div class="empty">
+            <h2>No jobs posted yet</h2>
+            <p>
+                Jobs will appear here after an employer posts them.
+            </p>
+        </div>
+        """
+
+    body = f"""
+    <section class="card hero">
+
+        <h1>Find your next opportunity 👋</h1>
+
+        <p>
+            Search jobs posted by employers and apply online.
+        </p>
+
+        <form method="get" action="/jobs">
+
+            <input
+                name="q"
+                placeholder="Job title, company, skills..."
+            >
+
+            <br><br>
+
+            <div class="grid">
+
+                <select name="country">
+                    <option value="">All countries</option>
+                    <option>India</option>
+                    <option>United States</option>
+                    <option>United Kingdom</option>
+                    <option>Canada</option>
+                    <option>Australia</option>
+                </select>
+
+                <select name="job_type">
+                    <option value="">All job types</option>
+                    <option>Full Time</option>
+                    <option>Part Time</option>
+                    <option>Remote</option>
+                    <option>Contract</option>
+                    <option>Internship</option>
+                </select>
+
+            </div>
+
+            <br>
+
+            <button class="btn" style="width:100%">
+                Search Jobs
+            </button>
+
+        </form>
+
+    </section>
+
+    <section>
+
+        <div style="
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            margin-bottom:15px;
+        ">
+            <h2>Latest Jobs</h2>
+            <a class="btn secondary" href="/jobs">
+                View All
+            </a>
+        </div>
+
+        <div class="job-grid">
+            {job_html}
+        </div>
+
+    </section>
+    """
+
+    return layout(
+        "Home",
+        body,
+        user
     )
 
-    email: str
 
-    password: str = Field(
-        min_length=6,
-        max_length=100
+# =========================================================
+# JOB CARD
+# =========================================================
+
+def job_card(job):
+    skills = ""
+
+    for skill in (job["skills"] or "").split(","):
+        skill = skill.strip()
+
+        if skill:
+            skills += (
+                f'<span class="badge">'
+                f'{html.escape(skill)}'
+                f'</span>'
+            )
+
+    return f"""
+    <article class="job">
+
+        <h3>
+            <a href="/job/{job['id']}">
+                {html.escape(job['title'])}
+            </a>
+        </h3>
+
+        <div class="company">
+            {html.escape(job['company'])}
+        </div>
+
+        <div class="meta">
+            📍 {html.escape(job['location'] or 'India')}
+        </div>
+
+        <div class="meta">
+            💼 {html.escape(job['job_type'])}
+        </div>
+
+        <div class="meta">
+            💰 {html.escape(job['salary'] or 'Salary not specified')}
+        </div>
+
+        <div>
+            {skills}
+        </div>
+
+        <br>
+
+        <a
+            class="btn"
+            href="/job/{job['id']}"
+        >
+            View Job
+        </a>
+
+    </article>
+    """
+
+
+# =========================================================
+# JOB SEARCH
+# =========================================================
+
+@app.get("/jobs", response_class=HTMLResponse)
+def jobs(
+    request: Request,
+    q: str = "",
+    country: str = "",
+    job_type: str = ""
+):
+    user = get_user(request)
+
+    query = """
+        SELECT jobs.*, users.name AS employer_name
+        FROM jobs
+        JOIN users ON users.id = jobs.employer_id
+        WHERE jobs.status='active'
+    """
+
+    params = []
+
+    if q.strip():
+        query += """
+        AND (
+            jobs.title LIKE ?
+            OR jobs.company LIKE ?
+            OR jobs.skills LIKE ?
+            OR jobs.description LIKE ?
+            OR jobs.location LIKE ?
+        )
+        """
+
+        value = "%" + q.strip() + "%"
+
+        params.extend([
+            value,
+            value,
+            value,
+            value,
+            value
+        ])
+
+    if country.strip():
+        query += " AND jobs.country=?"
+        params.append(country.strip())
+
+    if job_type.strip():
+        query += " AND jobs.job_type=?"
+        params.append(job_type.strip())
+
+    query += " ORDER BY jobs.id DESC"
+
+    conn = db()
+
+    rows = conn.execute(
+        query,
+        params
+    ).fetchall()
+
+    conn.close()
+
+    cards = ""
+
+    for job in rows:
+        cards += job_card(job)
+
+    if not cards:
+        cards = """
+        <div class="card empty">
+
+            <h2>No jobs found</h2>
+
+            <p>
+                Try another job title, company or skill.
+            </p>
+
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+
+        <h1>Find Jobs</h1>
+
+        <form method="get" action="/jobs">
+
+            <input
+                name="q"
+                value="{html.escape(q)}"
+                placeholder="Search jobs, companies, skills..."
+            >
+
+            <br>
+
+            <div class="grid">
+
+                <select name="country">
+
+                    <option value="">
+                        All countries
+                    </option>
+
+                    <option
+                        {"selected" if country=="India" else ""}
+                    >
+                        India
+                    </option>
+
+                    <option
+                        {"selected" if country=="United States" else ""}
+                    >
+                        United States
+                    </option>
+
+                    <option
+                        {"selected" if country=="United Kingdom" else ""}
+                    >
+                        United Kingdom
+                    </option>
+
+                    <option
+                        {"selected" if country=="Canada" else ""}
+                    >
+                        Canada
+                    </option>
+
+                </select>
+
+                <select name="job_type">
+
+                    <option value="">
+                        All job types
+                    </option>
+
+                    <option
+                        {"selected" if job_type=="Full Time" else ""}
+                    >
+                        Full Time
+                    </option>
+
+                    <option
+                        {"selected" if job_type=="Part Time" else ""}
+                    >
+                        Part Time
+                    </option>
+
+                    <option
+                        {"selected" if job_type=="Remote" else ""}
+                    >
+                        Remote
+                    </option>
+
+                    <option
+                        {"selected" if job_type=="Contract" else ""}
+                    >
+                        Contract
+                    </option>
+
+                    <option
+                        {"selected" if job_type=="Internship" else ""}
+                    >
+                        Internship
+                    </option>
+
+                </select>
+
+            </div>
+
+            <br>
+
+            <button class="btn">
+                Search
+            </button>
+
+        </form>
+
+    </div>
+
+    <div class="job-grid">
+        {cards}
+    </div>
+    """
+
+    return layout(
+        "Jobs",
+        body,
+        user,
+        q
     )
 
-    role: str = "jobseeker"
 
-    phone: str = ""
+# =========================================================
+# JOB DETAILS
+# =========================================================
 
-    location: str = ""
+@app.get("/job/{job_id}", response_class=HTMLResponse)
+def job_detail(
+    request: Request,
+    job_id: int
+):
+    user = get_user(request)
 
+    conn = db()
 
-class LoginIn(BaseModel):
+    job = conn.execute("""
+        SELECT jobs.*, users.name AS employer_name
+        FROM jobs
+        JOIN users ON users.id=jobs.employer_id
+        WHERE jobs.id=?
+    """, (job_id,)).fetchone()
 
-    email: str
-    password: str
+    conn.close()
 
+    if not job:
+        return HTMLResponse(
+            layout(
+                "Job Not Found",
+                """
+                <div class="card empty">
+                    <h1>Job not found</h1>
+                    <a class="btn" href="/jobs">
+                        Back to Jobs
+                    </a>
+                </div>
+                """,
+                user
+            ),
+            status_code=404
+        )
 
-class OTPRequest(BaseModel):
+    skills = ""
 
-    email: str
+    for skill in (job["skills"] or "").split(","):
+        if skill.strip():
+            skills += (
+                f'<span class="badge">'
+                f'{html.escape(skill.strip())}'
+                f'</span>'
+            )
 
+    apply_section = ""
 
-class OTPLogin(BaseModel):
+    if user:
+        if user["role"] == "employer":
+            apply_section = """
+            <div class="alert">
+                Employers cannot apply to jobs.
+            </div>
+            """
 
-    email: str
-    otp: str
+        else:
+            conn = db()
 
+            existing = conn.execute("""
+                SELECT id
+                FROM applications
+                WHERE job_id=? AND user_id=?
+            """, (job_id, user["id"])).fetchone()
 
-class ResetPasswordIn(BaseModel):
+            conn.close()
 
-    email: str
-    otp: str
+            if existing:
+                apply_section = """
+                <div class="alert success-alert">
+                    You already applied for this job.
+                </div>
+                """
 
-    new_password: str = Field(
-        min_length=6,
-        max_length=100
+            else:
+                apply_section = f"""
+                <div class="card">
+
+                    <h2>Apply for this job</h2>
+
+                    <form
+                        method="post"
+                        action="/apply/{job_id}"
+                    >
+
+                        <label>
+                            Cover Letter
+                        </label>
+
+                        <textarea
+                            name="cover_letter"
+                            placeholder="Tell the employer why you are suitable..."
+                        ></textarea>
+
+                        <br><br>
+
+                        <button class="btn success">
+                            Apply Now
+                        </button>
+
+                    </form>
+
+                </div>
+                """
+
+    else:
+        apply_section = """
+        <div class="card">
+
+            <h2>Interested in this job?</h2>
+
+            <p>
+                Create an account or login to apply.
+            </p>
+
+            <a class="btn" href="/login">
+                Login to Apply
+            </a>
+
+            <a class="btn secondary" href="/register">
+                Create Account
+            </a>
+
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+
+        <a href="/jobs" style="color:#1769d5">
+            ← Back to Jobs
+        </a>
+
+        <br><br>
+
+        <h1>
+            {html.escape(job["title"])}
+        </h1>
+
+        <h2>
+            {html.escape(job["company"])}
+        </h2>
+
+        <div class="meta">
+            📍 {html.escape(job["location"] or "India")}
+        </div>
+
+        <div class="meta">
+            🌎 {html.escape(job["country"])}
+        </div>
+
+        <div class="meta">
+            💼 {html.escape(job["job_type"])}
+        </div>
+
+        <div class="meta">
+            💰 {html.escape(job["salary"] or "Not specified")}
+        </div>
+
+        <div class="meta">
+            🎓 {html.escape(job["education"] or "Not specified")}
+        </div>
+
+        <div class="meta">
+            👨‍💼 Employer:
+            {html.escape(job["employer_name"])}
+        </div>
+
+        <hr>
+
+        <h2>Job Description</h2>
+
+        <p style="white-space:pre-wrap">
+            {html.escape(job["description"])}
+        </p>
+
+        <h2>Skills</h2>
+
+        <div>
+            {skills or "Not specified"}
+        </div>
+
+        <h2>Experience</h2>
+
+        <p>
+            {html.escape(job["experience"] or "Not specified")}
+        </p>
+
+    </div>
+
+    {apply_section}
+    """
+
+    return layout(
+        job["title"],
+        body,
+        user
     )
-
-
-class ProfileIn(BaseModel):
-
-    name: str = Field(
-        min_length=2,
-        max_length=100
-    )
-
-    phone: str = ""
-    location: str = ""
-    bio: str = ""
-    skills: str = ""
-    experience: str = ""
-    education: str = ""
-    resume: str = ""
-
-    company_name: str = ""
-    company_description: str = ""
-
-
-class JobIn(BaseModel):
-
-    title: str = Field(
-        min_length=2,
-        max_length=150
-    )
-
-    company: str = Field(
-        min_length=2,
-        max_length=150
-    )
-
-    description: str = Field(
-        min_length=10,
-        max_length=10000
-    )
-
-    skills: str = ""
-
-    country: str = "India"
-
-    location: str = ""
-
-    job_type: str = "Full-time"
-
-    work_mode: str = "On-site"
-
-    salary_min: int = 0
-
-    salary_max: int = 0
-
-    experience: str = ""
-
-    education: str = ""
-
-    openings: int = 1
-
-
-class ApplyIn(BaseModel):
-
-    cover_letter: str = ""
-
-    resume: str = ""
-
-
-class StatusIn(BaseModel):
-
-    status: str
 
 
 # =========================================================
 # REGISTER
 # =========================================================
 
-@app.post("/api/register")
-def register(data: RegisterIn):
+@app.get("/register", response_class=HTMLResponse)
+def register_page(request: Request):
+    user = get_user(request)
 
-    email = clean_email(data.email)
+    if user:
+        return RedirectResponse(
+            "/dashboard",
+            status_code=303
+        )
+
+    body = """
+    <div class="card auth-card">
+
+        <h1>Create Account</h1>
+
+        <p>
+            Join Job Mart and start your career.
+        </p>
+
+        <form method="post" action="/register">
+
+            <label>Full Name</label>
+
+            <input
+                name="name"
+                required
+                placeholder="Your name"
+            >
+
+            <label>Email</label>
+
+            <input
+                type="email"
+                name="email"
+                required
+                placeholder="you@example.com"
+            >
+
+            <label>Phone</label>
+
+            <input
+                name="phone"
+                placeholder="10 digit mobile number"
+            >
+
+            <label>Location</label>
+
+            <input
+                name="location"
+                placeholder="City, State"
+            >
+
+            <label>Account Type</label>
+
+            <select name="role">
+
+                <option value="jobseeker">
+                    Job Seeker
+                </option>
+
+                <option value="employer">
+                    Employer
+                </option>
+
+            </select>
+
+            <label>Password</label>
+
+            <input
+                type="password"
+                name="password"
+                required
+                minlength="6"
+                placeholder="Minimum 6 characters"
+            >
+
+            <label>Confirm Password</label>
+
+            <input
+                type="password"
+                name="confirm_password"
+                required
+                minlength="6"
+            >
+
+            <br><br>
+
+            <button class="btn" style="width:100%">
+                Create Account
+            </button>
+
+        </form>
+
+        <br>
+
+        <p>
+            Already have an account?
+            <a
+                href="/login"
+                style="color:#1769d5"
+            >
+                Login
+            </a>
+        </p>
+
+    </div>
+    """
+
+    return layout(
+        "Create Account",
+        body,
+        user
+    )
+
+
+@app.post("/register")
+def register(
+    request: Request,
+    name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(""),
+    location: str = Form(""),
+    role: str = Form("jobseeker"),
+    password: str = Form(...),
+    confirm_password: str = Form(...)
+):
+    name = name.strip()
+    email = email.strip().lower()
+
+    if not name:
+        return HTMLResponse(
+            layout(
+                "Registration Error",
+                """
+                <div class="card alert">
+                    Name is required.
+                </div>
+                """,
+                None
+            ),
+            status_code=400
+        )
 
     if not valid_email(email):
-        raise HTTPException(
-            400,
-            "Enter a valid email"
+        return HTMLResponse(
+            layout(
+                "Registration Error",
+                """
+                <div class="card alert">
+                    Please enter a valid email address.
+                </div>
+                """,
+                None
+            ),
+            status_code=400
         )
 
-    if data.role not in [
-        "jobseeker",
-        "employer"
-    ]:
-        raise HTTPException(
-            400,
-            "Invalid account type"
+    if len(password) < 6:
+        return HTMLResponse(
+            layout(
+                "Registration Error",
+                """
+                <div class="card alert">
+                    Password must contain at least 6 characters.
+                </div>
+                """,
+                None
+            ),
+            status_code=400
         )
 
-    if get_user_by_email(email):
-        raise HTTPException(
-            409,
-            "An account already exists with this email"
+    if password != confirm_password:
+        return HTMLResponse(
+            layout(
+                "Registration Error",
+                """
+                <div class="card alert">
+                    Passwords do not match.
+                </div>
+                """,
+                None
+            ),
+            status_code=400
         )
+
+    if role not in ("jobseeker", "employer"):
+        role = "jobseeker"
 
     conn = db()
 
-    cur = conn.execute("""
+    existing = conn.execute(
+        "SELECT id FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    if existing:
+        conn.close()
+
+        return HTMLResponse(
+            layout(
+                "Account Exists",
+                f"""
+                <div class="card">
+
+                    <div class="alert">
+                        An account already exists with
+                        <strong>{html.escape(email)}</strong>.
+                    </div>
+
+                    <a class="btn" href="/login">
+                        Login
+                    </a>
+
+                </div>
+                """,
+                None
+            ),
+            status_code=400
+        )
+
+    cursor = conn.execute(
+        """
         INSERT INTO users
+        (name,email,password_hash,role,phone,location,created_at)
+        VALUES(?,?,?,?,?,?,?)
+        """,
         (
             name,
             email,
-            password_hash,
+            password_hash(password),
             role,
-            phone,
-            location,
-            created_at
+            phone.strip(),
+            location.strip(),
+            now_iso()
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data.name.strip(),
-        email,
-        hash_password(data.password),
-        data.role,
-        data.phone.strip(),
-        data.location.strip(),
-        now()
-    ))
+    )
+
+    user_id = cursor.lastrowid
 
     conn.commit()
-
-    user_id = cur.lastrowid
-
     conn.close()
-
-    user = get_user_by_id(user_id)
 
     token = create_session(user_id)
 
-    return {
-        "ok": True,
-        "message": "Account created successfully",
-        "token": token,
-        "user": public_user(user)
-    }
+    response = RedirectResponse(
+        "/dashboard",
+        status_code=303
+    )
+
+    response.set_cookie(
+        "jobmart_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=60 * 60 * 24 * 30
+    )
+
+    return response
 
 
 # =========================================================
 # LOGIN
 # =========================================================
 
-@app.post("/api/login")
-def login(data: LoginIn):
+@app.get("/login", response_class=HTMLResponse)
+def login_page(
+    request: Request,
+    msg: str = ""
+):
+    user = get_user(request)
 
-    user = get_user_by_email(
-        data.email
-    )
-
-    if not user:
-        raise HTTPException(
-            401,
-            "Invalid email or password"
+    if user:
+        return RedirectResponse(
+            "/dashboard",
+            status_code=303
         )
 
-    if not verify_password(
-        data.password,
+    message_html = ""
+
+    if msg:
+        message_html = f"""
+        <div class="alert">
+            {html.escape(msg)}
+        </div>
+        """
+
+    body = f"""
+    <div class="card auth-card">
+
+        <h1>Welcome Back 👋</h1>
+
+        {message_html}
+
+        <div class="tabs">
+
+            <a
+                href="/login"
+                class="tab active"
+            >
+                Password
+            </a>
+
+            <a
+                href="/otp-login"
+                class="tab"
+            >
+                OTP Login
+            </a>
+
+        </div>
+
+        <form method="post" action="/login">
+
+            <label>Email</label>
+
+            <input
+                type="email"
+                name="email"
+                required
+                placeholder="you@example.com"
+            >
+
+            <label>Password</label>
+
+            <input
+                type="password"
+                name="password"
+                required
+                placeholder="Password"
+            >
+
+            <br><br>
+
+            <button class="btn">
+                Login
+            </button>
+
+            <a
+                class="btn secondary"
+                href="/forgot-password"
+            >
+                Forgot Password?
+            </a>
+
+        </form>
+
+        <br>
+
+        <a
+            class="btn secondary"
+            href="/register"
+        >
+            Create Account
+        </a>
+
+    </div>
+    """
+
+    return layout(
+        "Login",
+        body,
+        None
+    )
+
+
+@app.post("/login")
+def login(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...)
+):
+    email = email.strip().lower()
+
+    conn = db()
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    conn.close()
+
+    if not user or not password_verify(
+        password,
         user["password_hash"]
     ):
-        raise HTTPException(
-            401,
-            "Invalid email or password"
+        return HTMLResponse(
+            layout(
+                "Login Failed",
+                f"""
+                <div class="card auth-card">
+
+                    <div class="alert">
+                        Invalid email or password.
+                    </div>
+
+                    <a class="btn" href="/login">
+                        Try Again
+                    </a>
+
+                    <a
+                        class="btn secondary"
+                        href="/register"
+                    >
+                        Create Account
+                    </a>
+
+                </div>
+                """,
+                None
+            ),
+            status_code=401
         )
 
-    token = create_session(
-        user["id"]
+    token = create_session(user["id"])
+
+    response = RedirectResponse(
+        "/dashboard",
+        status_code=303
     )
 
-    return {
-        "ok": True,
-        "token": token,
-        "user": public_user(user)
-    }
+    response.set_cookie(
+        "jobmart_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=60 * 60 * 24 * 30
+    )
+
+    return response
 
 
 # =========================================================
 # OTP LOGIN
 # =========================================================
 
-@app.post("/api/send-otp")
-def send_otp(data: OTPRequest):
+@app.get("/otp-login", response_class=HTMLResponse)
+def otp_login_page(
+    request: Request,
+    email: str = "",
+    sent: str = "",
+    error: str = ""
+):
+    user = get_user(request)
 
-    email = clean_email(
-        data.email
+    if user:
+        return RedirectResponse(
+            "/dashboard",
+            status_code=303
+        )
+
+    alert = ""
+
+    if error:
+        alert = f"""
+        <div class="alert">
+            {html.escape(error)}
+        </div>
+        """
+
+    body = f"""
+    <div class="card auth-card">
+
+        <h1>Welcome Back 👋</h1>
+
+        {alert}
+
+        <div class="tabs">
+
+            <a
+                href="/login"
+                class="tab"
+            >
+                Password
+            </a>
+
+            <a
+                href="/otp-login"
+                class="tab active"
+            >
+                OTP Login
+            </a>
+
+        </div>
+
+        <form method="post" action="/send-login-otp">
+
+            <label>Email</label>
+
+            <input
+                type="email"
+                name="email"
+                value="{html.escape(email)}"
+                required
+                placeholder="you@example.com"
+            >
+
+            <br><br>
+
+            <button class="btn secondary">
+                Send OTP
+            </button>
+
+        </form>
+
+        <br>
+
+        <form method="post" action="/verify-login-otp">
+
+            <input
+                type="hidden"
+                name="email"
+                value="{html.escape(email)}"
+            >
+
+            <label>6-digit OTP</label>
+
+            <input
+                name="otp"
+                inputmode="numeric"
+                maxlength="6"
+                pattern="[0-9]{{6}}"
+                placeholder="Enter OTP"
+            >
+
+            <br><br>
+
+            <button class="btn">
+                Login with OTP
+            </button>
+
+        </form>
+
+        <br>
+
+        <a
+            class="btn secondary"
+            href="/register"
+        >
+            Create Account
+        </a>
+
+        {"<div class='alert success-alert'>OTP sent. For this demo the OTP is shown on screen after sending.</div>" if sent else ""}
+
+    </div>
+    """
+
+    return layout(
+        "OTP Login",
+        body,
+        None
     )
 
-    user = get_user_by_email(
-        email
-    )
+
+@app.post("/send-login-otp")
+def send_login_otp(
+    email: str = Form(...)
+):
+    email = email.strip().lower()
+
+    conn = db()
+
+    user = conn.execute(
+        "SELECT id FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    conn.close()
 
     if not user:
-        raise HTTPException(
-            404,
-            "No account found with this email. Create an account first."
+        return RedirectResponse(
+            "/otp-login?email=" +
+            email +
+            "&error=No account found with this email. Create an account first.",
+            status_code=303
         )
 
-    otp = f"{secrets.randbelow(1000000):06d}"
-
-    OTPS[email] = {
-        "otp": otp,
-        "expires": (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=5)
-        )
-    }
-
-    return {
-        "ok": True,
-        "message": "OTP generated",
-        "demo_otp": otp
-    }
-
-
-@app.post("/api/login-otp")
-def login_otp(data: OTPLogin):
-
-    email = clean_email(
-        data.email
+    otp = create_otp(
+        email,
+        "login"
     )
 
-    item = OTPS.get(email)
+    # DEMO ONLY:
+    # Real email/SMS service can be connected later.
 
-    if not item:
-        raise HTTPException(
-            400,
-            "Please request OTP first"
+    body = f"""
+    <div class="card auth-card">
+
+        <div class="alert success-alert">
+
+            OTP generated successfully.
+
+            <br><br>
+
+            <strong style="font-size:30px">
+                {otp}
+            </strong>
+
+            <br><br>
+
+            This demo displays the OTP on screen.
+            In production, send it through email/SMS.
+
+        </div>
+
+        <a
+            class="btn"
+            href="/otp-login?email={email}&sent=1"
+        >
+            Enter OTP
+        </a>
+
+    </div>
+    """
+
+    return HTMLResponse(
+        layout(
+            "OTP Generated",
+            body,
+            None
         )
+    )
 
-    if datetime.now(timezone.utc) > item["expires"]:
 
-        OTPS.pop(email, None)
+@app.post("/verify-login-otp")
+def verify_login_otp(
+    request: Request,
+    email: str = Form(...),
+    otp: str = Form(...)
+):
+    email = email.strip().lower()
+    otp = otp.strip()
 
-        raise HTTPException(
-            400,
-            "OTP expired"
-        )
-
-    if not secrets.compare_digest(
-        data.otp.strip(),
-        item["otp"]
+    if not verify_otp(
+        email,
+        otp,
+        "login"
     ):
-        raise HTTPException(
-            401,
-            "Invalid OTP"
+        return RedirectResponse(
+            "/otp-login?email=" +
+            email +
+            "&error=Invalid or expired OTP.",
+            status_code=303
         )
 
-    user = get_user_by_email(
-        email
-    )
+    conn = db()
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    conn.close()
 
     if not user:
-        raise HTTPException(
-            404,
-            "Account not found"
+        return RedirectResponse(
+            "/otp-login?error=Account not found.",
+            status_code=303
         )
 
-    OTPS.pop(email, None)
+    token = create_session(user["id"])
 
-    token = create_session(
-        user["id"]
+    response = RedirectResponse(
+        "/dashboard",
+        status_code=303
     )
 
-    return {
-        "ok": True,
-        "token": token,
-        "user": public_user(user)
-    }
+    response.set_cookie(
+        "jobmart_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=60 * 60 * 24 * 30
+    )
+
+    return response
 
 
 # =========================================================
 # FORGOT PASSWORD
 # =========================================================
 
-@app.post("/api/forgot-password")
-def forgot_password(data: OTPRequest):
+@app.get("/forgot-password", response_class=HTMLResponse)
+def forgot_page(
+    request: Request,
+    email: str = "",
+    error: str = ""
+):
+    user = get_user(request)
 
-    email = clean_email(
-        data.email
+    if user:
+        return RedirectResponse(
+            "/dashboard",
+            status_code=303
+        )
+
+    error_html = ""
+
+    if error:
+        error_html = f"""
+        <div class="alert">
+            {html.escape(error)}
+        </div>
+        """
+
+    body = f"""
+    <div class="card auth-card">
+
+        <h1>Forgot Password</h1>
+
+        {error_html}
+
+        <form method="post" action="/send-reset-otp">
+
+            <label>Email</label>
+
+            <input
+                type="email"
+                name="email"
+                value="{html.escape(email)}"
+                required
+                placeholder="you@example.com"
+            >
+
+            <br><br>
+
+            <button class="btn">
+                Send Reset OTP
+            </button>
+
+        </form>
+
+        <br>
+
+        <a
+            class="btn secondary"
+            href="/login"
+        >
+            Back to Login
+        </a>
+
+    </div>
+    """
+
+    return layout(
+        "Forgot Password",
+        body,
+        None
     )
 
-    user = get_user_by_email(
-        email
-    )
+
+@app.post("/send-reset-otp")
+def send_reset_otp(
+    email: str = Form(...)
+):
+    email = email.strip().lower()
+
+    conn = db()
+
+    user = conn.execute(
+        "SELECT id FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    conn.close()
 
     if not user:
-        raise HTTPException(
-            404,
-            "No account found with this email"
+        return RedirectResponse(
+            "/forgot-password?email=" +
+            email +
+            "&error=No account found with this email. Create an account first.",
+            status_code=303
         )
 
-    otp = f"{secrets.randbelow(1000000):06d}"
-
-    OTPS["reset:" + email] = {
-        "otp": otp,
-        "expires": (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=5)
-        )
-    }
-
-    return {
-        "ok": True,
-        "demo_otp": otp
-    }
-
-
-@app.post("/api/reset-password")
-def reset_password(
-    data: ResetPasswordIn
-):
-
-    email = clean_email(
-        data.email
+    otp = create_otp(
+        email,
+        "reset"
     )
 
-    key = "reset:" + email
+    body = f"""
+    <div class="card auth-card">
 
-    item = OTPS.get(key)
+        <div class="alert success-alert">
 
-    if not item:
-        raise HTTPException(
-            400,
-            "Request reset OTP first"
+            Password reset OTP generated.
+
+            <br><br>
+
+            <strong style="font-size:30px">
+                {otp}
+            </strong>
+
+            <br><br>
+
+            Demo mode: OTP is displayed here.
+            Production version can send it by email/SMS.
+
+        </div>
+
+        <a
+            class="btn"
+            href="/reset-password?email={email}"
+        >
+            Continue
+        </a>
+
+    </div>
+    """
+
+    return HTMLResponse(
+        layout(
+            "Reset OTP",
+            body,
+            None
+        )
+    )
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+def reset_password_page(
+    request: Request,
+    email: str = "",
+    error: str = ""
+):
+    error_html = ""
+
+    if error:
+        error_html = f"""
+        <div class="alert">
+            {html.escape(error)}
+        </div>
+        """
+
+    body = f"""
+    <div class="card auth-card">
+
+        <h1>Reset Password</h1>
+
+        {error_html}
+
+        <form method="post" action="/reset-password">
+
+            <input
+                type="hidden"
+                name="email"
+                value="{html.escape(email)}"
+            >
+
+            <label>6-digit OTP</label>
+
+            <input
+                name="otp"
+                required
+                maxlength="6"
+                pattern="[0-9]{{6}}"
+                inputmode="numeric"
+            >
+
+            <label>New Password</label>
+
+            <input
+                type="password"
+                name="password"
+                required
+                minlength="6"
+            >
+
+            <label>Confirm Password</label>
+
+            <input
+                type="password"
+                name="confirm_password"
+                required
+                minlength="6"
+            >
+
+            <br><br>
+
+            <button class="btn">
+                Reset Password
+            </button>
+
+        </form>
+
+    </div>
+    """
+
+    return layout(
+        "Reset Password",
+        body,
+        None
+    )
+
+
+@app.post("/reset-password")
+def reset_password(
+    email: str = Form(...),
+    otp: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...)
+):
+    email = email.strip().lower()
+
+    if password != confirm_password:
+        return RedirectResponse(
+            "/reset-password?email=" +
+            email +
+            "&error=Passwords do not match.",
+            status_code=303
         )
 
-    if datetime.now(timezone.utc) > item["expires"]:
-
-        OTPS.pop(key, None)
-
-        raise HTTPException(
-            400,
-            "Reset OTP expired"
+    if len(password) < 6:
+        return RedirectResponse(
+            "/reset-password?email=" +
+            email +
+            "&error=Password must contain at least 6 characters.",
+            status_code=303
         )
 
-    if not secrets.compare_digest(
-        data.otp.strip(),
-        item["otp"]
+    if not verify_otp(
+        email,
+        otp.strip(),
+        "reset"
     ):
-        raise HTTPException(
-            401,
-            "Invalid OTP"
+        return RedirectResponse(
+            "/reset-password?email=" +
+            email +
+            "&error=Invalid or expired OTP.",
+            status_code=303
+        )
+
+    conn = db()
+
+    user = conn.execute(
+        "SELECT id FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    if not user:
+        conn.close()
+
+        return RedirectResponse(
+            "/login?msg=Account not found.",
+            status_code=303
+        )
+
+    conn.execute(
+        """
+        UPDATE users
+        SET password_hash=?
+        WHERE id=?
+        """,
+        (
+            password_hash(password),
+            user["id"]
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(
+        "/login?msg=Password reset successful. Please login.",
+        status_code=303
+    )
+
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+    user = get_user(request)
+
+    if not user:
+        return redirect_login(
+            "Please login first."
+        )
+
+    conn = db()
+
+    applications_count = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM applications
+        WHERE user_id=?
+        """,
+        (user["id"],)
+    ).fetchone()[0]
+
+    jobs_count = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM jobs
+        WHERE employer_id=?
+        """,
+        (user["id"],)
+    ).fetchone()[0]
+
+    conn.close()
+
+    initial = (
+        user["name"][0].upper()
+        if user["name"]
+        else "U"
+    )
+
+    body = f"""
+    <div class="card">
+
+        <div class="profile">
+
+            <div class="avatar">
+                {html.escape(initial)}
+            </div>
+
+            <div>
+
+                <h1>
+                    Welcome, {html.escape(user["name"])} 👋
+                </h1>
+
+                <p>
+                    {html.escape(user["email"])}
+                </p>
+
+                <span class="badge">
+                    {html.escape(user["role"].title())}
+                </span>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="stat-grid">
+
+        <div class="stat">
+            <strong>{applications_count}</strong>
+            Applications
+        </div>
+
+        <div class="stat">
+            <strong>{jobs_count}</strong>
+            Jobs Posted
+        </div>
+
+        <div class="stat">
+            <strong>✓</strong>
+            Account Active
+        </div>
+
+    </div>
+
+    <br>
+
+    <div class="card">
+
+        <h2>Quick Actions</h2>
+
+        <a class="btn" href="/jobs">
+            Find Jobs
+        </a>
+
+        <a
+            class="btn secondary"
+            href="/applications"
+        >
+            My Applications
+        </a>
+
+        {"<a class='btn success' href='/post-job'>Post a Job</a>" if user["role"]=="employer" else ""}
+
+    </div>
+    """
+
+    return layout(
+        "Dashboard",
+        body,
+        user
+    )
+
+
+# =========================================================
+# POST JOB
+# =========================================================
+
+@app.get("/post-job", response_class=HTMLResponse)
+def post_job_page(request: Request):
+    user = get_user(request)
+
+    if not user:
+        return redirect_login(
+            "Login to post a job."
+        )
+
+    if user["role"] != "employer":
+        return HTMLResponse(
+            layout(
+                "Access Denied",
+                """
+                <div class="card alert">
+                    Only employer accounts can post jobs.
+                </div>
+                """,
+                user
+            ),
+            status_code=403
+        )
+
+    body = """
+    <div class="card">
+
+        <h1>Post a New Job</h1>
+
+        <form method="post" action="/post-job">
+
+            <div class="grid">
+
+                <div>
+                    <label>Job Title</label>
+
+                    <input
+                        name="title"
+                        required
+                        placeholder="Software Developer"
+                    >
+                </div>
+
+                <div>
+                    <label>Company</label>
+
+                    <input
+                        name="company"
+                        required
+                        placeholder="Company name"
+                    >
+                </div>
+
+                <div>
+                    <label>Location</label>
+
+                    <input
+                        name="location"
+                        placeholder="Hyderabad"
+                    >
+                </div>
+
+                <div>
+                    <label>Country</label>
+
+                    <select name="country">
+
+                        <option>India</option>
+                        <option>United States</option>
+                        <option>United Kingdom</option>
+                        <option>Canada</option>
+                        <option>Australia</option>
+
+                    </select>
+                </div>
+
+                <div>
+                    <label>Job Type</label>
+
+                    <select name="job_type">
+
+                        <option>Full Time</option>
+                        <option>Part Time</option>
+                        <option>Remote</option>
+                        <option>Contract</option>
+                        <option>Internship</option>
+
+                    </select>
+                </div>
+
+                <div>
+                    <label>Salary</label>
+
+                    <input
+                        name="salary"
+                        placeholder="₹5 LPA - ₹10 LPA"
+                    >
+                </div>
+
+                <div>
+                    <label>Experience</label>
+
+                    <input
+                        name="experience"
+                        placeholder="0-2 years"
+                    >
+                </div>
+
+                <div>
+                    <label>Education</label>
+
+                    <input
+                        name="education"
+                        placeholder="Any Degree"
+                    >
+                </div>
+
+            </div>
+
+            <label>Skills</label>
+
+            <input
+                name="skills"
+                placeholder="Python, FastAPI, SQL"
+            >
+
+            <label>Job Description</label>
+
+            <textarea
+                name="description"
+                required
+                placeholder="Describe the job..."
+            ></textarea>
+
+            <br><br>
+
+            <button class="btn success">
+                Publish Job
+            </button>
+
+        </form>
+
+    </div>
+    """
+
+    return layout(
+        "Post Job",
+        body,
+        user
+    )
+
+
+@app.post("/post-job")
+def post_job(
+    request: Request,
+    title: str = Form(...),
+    company: str = Form(...),
+    description: str = Form(...),
+    skills: str = Form(""),
+    country: str = Form("India"),
+    location: str = Form(""),
+    job_type: str = Form("Full Time"),
+    salary: str = Form(""),
+    experience: str = Form(""),
+    education: str = Form("")
+):
+    user = get_user(request)
+
+    if not user:
+        return redirect_login(
+            "Login to post a job."
+        )
+
+    if user["role"] != "employer":
+        return HTMLResponse(
+            layout(
+                "Access Denied",
+                """
+                <div class="card alert">
+                    Only employers can post jobs.
+                </div>
+                """,
+                user
+            ),
+            status_code=403
         )
 
     conn = db()
 
     conn.execute(
         """
-        UPDATE users
-        SET password_hash=?
-        WHERE email=?
-        """,
-        (
-            hash_password(data.new_password),
-            email
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-    OTPS.pop(key, None)
-
-    return {
-        "ok": True,
-        "message": "Password changed successfully"
-    }
-
-
-# =========================================================
-# LOGOUT
-# =========================================================
-
-@app.post("/api/logout")
-def logout(request: Request):
-
-    token = (
-        request.headers.get("X-Session-Token")
-        or request.cookies.get("jobmart_session")
-    )
-
-    if token:
-        SESSIONS.pop(token, None)
-
-    return {
-        "ok": True,
-        "message": "Logged out"
-    }
-
-
-# =========================================================
-# CURRENT USER
-# =========================================================
-
-@app.get("/api/me")
-def me(request: Request):
-
-    user = current_user(request)
-
-    if not user:
-
-        return {
-            "logged_in": False,
-            "user": None
-        }
-
-    return {
-        "logged_in": True,
-        "user": public_user(user)
-    }
-
-
-# =========================================================
-# PROFILE
-# =========================================================
-
-@app.get("/api/profile")
-def get_profile(request: Request):
-
-    user = require_user(request)
-
-    return {
-        "user": public_user(user)
-    }
-
-
-@app.put("/api/profile")
-def update_profile(
-    data: ProfileIn,
-    request: Request
-):
-
-    user = require_user(request)
-
-    conn = db()
-
-    conn.execute("""
-        UPDATE users
-        SET
-            name=?,
-            phone=?,
-            location=?,
-            bio=?,
-            skills=?,
-            experience=?,
-            education=?,
-            resume=?,
-            company_name=?,
-            company_description=?
-        WHERE id=?
-    """, (
-        data.name.strip(),
-        data.phone.strip(),
-        data.location.strip(),
-        data.bio.strip(),
-        data.skills.strip(),
-        data.experience.strip(),
-        data.education.strip(),
-        data.resume.strip(),
-        data.company_name.strip(),
-        data.company_description.strip(),
-        user["id"]
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return {
-        "ok": True,
-        "message": "Profile saved successfully",
-        "user": public_user(
-            get_user_by_id(user["id"])
-        )
-    }
-
-
-# =========================================================
-# CREATE JOB
-# =========================================================
-
-@app.post("/api/jobs")
-def create_job(
-    data: JobIn,
-    request: Request
-):
-
-    user = require_user(request)
-
-    if user["role"] != "employer":
-
-        raise HTTPException(
-            403,
-            "Only employers can post jobs"
-        )
-
-    if data.job_type not in JOB_TYPES:
-
-        raise HTTPException(
-            400,
-            "Invalid job type"
-        )
-
-    if data.work_mode not in WORK_MODES:
-
-        raise HTTPException(
-            400,
-            "Invalid work mode"
-        )
-
-    if data.salary_min < 0:
-        raise HTTPException(
-            400,
-            "Invalid minimum salary"
-        )
-
-    if data.salary_max < 0:
-        raise HTTPException(
-            400,
-            "Invalid maximum salary"
-        )
-
-    if (
-        data.salary_max
-        and data.salary_min > data.salary_max
-    ):
-        raise HTTPException(
-            400,
-            "Minimum salary cannot exceed maximum salary"
-        )
-
-    conn = db()
-
-    cur = conn.execute("""
         INSERT INTO jobs
         (
             employer_id,
@@ -911,691 +2597,251 @@ def create_job(
             country,
             location,
             job_type,
-            work_mode,
-            salary_min,
-            salary_max,
+            salary,
             experience,
             education,
-            openings,
             status,
             created_at
         )
-        VALUES (
-            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-        )
-    """, (
-        user["id"],
-        data.title.strip(),
-        data.company.strip(),
-        data.description.strip(),
-        data.skills.strip(),
-        data.country,
-        data.location.strip(),
-        data.job_type,
-        data.work_mode,
-        data.salary_min,
-        data.salary_max,
-        data.experience.strip(),
-        data.education.strip(),
-        max(1, data.openings),
-        "active",
-        now()
-    ))
-
-    conn.commit()
-
-    job_id = cur.lastrowid
-
-    conn.close()
-
-    return {
-        "ok": True,
-        "message": "Job posted successfully",
-        "job_id": job_id
-    }
-
-
-# =========================================================
-# SEARCH JOBS
-# =========================================================
-
-@app.get("/api/jobs")
-def jobs(
-    request: Request,
-    q: str = "",
-    country: str = "",
-    job_type: str = "",
-    work_mode: str = "",
-    location: str = "",
-    page: int = 1,
-    limit: int = 30
-):
-
-    page = max(1, page)
-
-    limit = min(
-        50,
-        max(1, limit)
-    )
-
-    offset = (
-        page - 1
-    ) * limit
-
-    clauses = [
-        "j.status='active'"
-    ]
-
-    params = []
-
-    if q.strip():
-
-        like = "%" + q.strip() + "%"
-
-        clauses.append("""
-        (
-            j.title LIKE ?
-            OR j.company LIKE ?
-            OR j.skills LIKE ?
-            OR j.description LIKE ?
-            OR j.location LIKE ?
-        )
-        """)
-
-        params += [
-            like,
-            like,
-            like,
-            like,
-            like
-        ]
-
-    if (
-        country
-        and country != "All countries"
-    ):
-
-        clauses.append(
-            "j.country=?"
-        )
-
-        params.append(country)
-
-    if (
-        job_type
-        and job_type != "All job types"
-    ):
-
-        clauses.append(
-            "j.job_type=?"
-        )
-
-        params.append(job_type)
-
-    if (
-        work_mode
-        and work_mode != "All work modes"
-    ):
-
-        clauses.append(
-            "j.work_mode=?"
-        )
-
-        params.append(work_mode)
-
-    if location.strip():
-
-        clauses.append(
-            "j.location LIKE ?"
-        )
-
-        params.append(
-            "%" + location.strip() + "%"
-        )
-
-    where = " AND ".join(
-        clauses
-    )
-
-    conn = db()
-
-    rows = conn.execute(
-        f"""
-        SELECT j.*
-        FROM jobs j
-        WHERE {where}
-        ORDER BY j.id DESC
-        LIMIT ? OFFSET ?
-        """,
-        params + [
-            limit,
-            offset
-        ]
-    ).fetchall()
-
-    user = current_user(request)
-
-    uid = (
-        user["id"]
-        if user
-        else -1
-    )
-
-    result = []
-
-    for row in rows:
-
-        saved = conn.execute(
-            """
-            SELECT 1
-            FROM saved_jobs
-            WHERE user_id=? AND job_id=?
-            """,
-            (
-                uid,
-                row["id"]
-            )
-        ).fetchone()
-
-        applied = conn.execute(
-            """
-            SELECT 1
-            FROM applications
-            WHERE user_id=? AND job_id=?
-            """,
-            (
-                uid,
-                row["id"]
-            )
-        ).fetchone()
-
-        result.append(
-            job_json(
-                row,
-                saved,
-                applied
-            )
-        )
-
-    total = conn.execute(
-        f"""
-        SELECT COUNT(*) c
-        FROM jobs j
-        WHERE {where}
-        """,
-        params
-    ).fetchone()["c"]
-
-    conn.close()
-
-    return {
-        "jobs": result,
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "pages": (
-            total + limit - 1
-        ) // limit
-    }
-
-
-# =========================================================
-# SINGLE JOB
-# =========================================================
-
-@app.get("/api/jobs/{job_id}")
-def get_job(
-    job_id: int,
-    request: Request
-):
-
-    conn = db()
-
-    row = conn.execute(
-        "SELECT * FROM jobs WHERE id=?",
-        (job_id,)
-    ).fetchone()
-
-    if not row:
-
-        conn.close()
-
-        raise HTTPException(
-            404,
-            "Job not found"
-        )
-
-    user = current_user(request)
-
-    uid = (
-        user["id"]
-        if user
-        else -1
-    )
-
-    saved = conn.execute(
-        """
-        SELECT 1
-        FROM saved_jobs
-        WHERE user_id=? AND job_id=?
-        """,
-        (
-            uid,
-            job_id
-        )
-    ).fetchone()
-
-    applied = conn.execute(
-        """
-        SELECT 1
-        FROM applications
-        WHERE user_id=? AND job_id=?
-        """,
-        (
-            uid,
-            job_id
-        )
-    ).fetchone()
-
-    conn.close()
-
-    return {
-        "job": job_json(
-            row,
-            saved,
-            applied
-        )
-    }
-
-
-# =========================================================
-# SAVE / UNSAVE JOB
-# =========================================================
-
-@app.post("/api/jobs/{job_id}/save")
-def save_job(
-    job_id: int,
-    request: Request
-):
-
-    user = require_user(request)
-
-    conn = db()
-
-    job = conn.execute(
-        "SELECT id FROM jobs WHERE id=?",
-        (job_id,)
-    ).fetchone()
-
-    if not job:
-
-        conn.close()
-
-        raise HTTPException(
-            404,
-            "Job not found"
-        )
-
-    exists = conn.execute(
-        """
-        SELECT 1
-        FROM saved_jobs
-        WHERE user_id=? AND job_id=?
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             user["id"],
-            job_id
+            title.strip(),
+            company.strip(),
+            description.strip(),
+            skills.strip(),
+            country.strip(),
+            location.strip(),
+            job_type.strip(),
+            salary.strip(),
+            experience.strip(),
+            education.strip(),
+            "active",
+            now_iso()
         )
-    ).fetchone()
-
-    if exists:
-
-        conn.execute(
-            """
-            DELETE FROM saved_jobs
-            WHERE user_id=? AND job_id=?
-            """,
-            (
-                user["id"],
-                job_id
-            )
-        )
-
-        saved = False
-
-        message = "Removed from saved jobs"
-
-    else:
-
-        conn.execute(
-            """
-            INSERT INTO saved_jobs
-            (
-                user_id,
-                job_id,
-                created_at
-            )
-            VALUES (?, ?, ?)
-            """,
-            (
-                user["id"],
-                job_id,
-                now()
-            )
-        )
-
-        saved = True
-
-        message = "Job saved"
+    )
 
     conn.commit()
-
     conn.close()
 
-    return {
-        "ok": True,
-        "saved": saved,
-        "message": message
-    }
-
-
-# =========================================================
-# SAVED JOBS
-# =========================================================
-
-@app.get("/api/saved")
-def saved_jobs(request: Request):
-
-    user = require_user(request)
-
-    conn = db()
-
-    rows = conn.execute("""
-        SELECT j.*
-        FROM jobs j
-        JOIN saved_jobs s
-            ON s.job_id=j.id
-        WHERE s.user_id=?
-        ORDER BY s.created_at DESC
-    """, (
-        user["id"],
-    )).fetchall()
-
-    result = [
-        job_json(
-            row,
-            True
-        )
-        for row in rows
-    ]
-
-    conn.close()
-
-    return {
-        "jobs": result
-    }
+    return RedirectResponse(
+        "/jobs",
+        status_code=303
+    )
 
 
 # =========================================================
 # APPLY
 # =========================================================
 
-@app.post("/api/jobs/{job_id}/apply")
+@app.post("/apply/{job_id}")
 def apply_job(
+    request: Request,
     job_id: int,
-    data: ApplyIn,
-    request: Request
+    cover_letter: str = Form("")
 ):
+    user = get_user(request)
 
-    user = require_user(request)
+    if not user:
+        return redirect_login(
+            "Login to apply for a job."
+        )
 
-    if user["role"] != "jobseeker":
-
-        raise HTTPException(
-            403,
-            "Only job seekers can apply"
+    if user["role"] == "employer":
+        return HTMLResponse(
+            layout(
+                "Cannot Apply",
+                """
+                <div class="card alert">
+                    Employer accounts cannot apply to jobs.
+                    Create a Job Seeker account to apply.
+                </div>
+                """,
+                user
+            ),
+            status_code=403
         )
 
     conn = db()
 
     job = conn.execute(
-        """
-        SELECT *
-        FROM jobs
-        WHERE id=?
-        AND status='active'
-        """,
+        "SELECT id FROM jobs WHERE id=? AND status='active'",
         (job_id,)
     ).fetchone()
 
     if not job:
-
         conn.close()
 
-        raise HTTPException(
-            404,
-            "Active job not found"
+        return HTMLResponse(
+            layout(
+                "Job Not Found",
+                """
+                <div class="card alert">
+                    Job not found or no longer active.
+                </div>
+                """,
+                user
+            ),
+            status_code=404
         )
 
-    existing = conn.execute(
-        """
-        SELECT id
-        FROM applications
-        WHERE job_id=?
-        AND user_id=?
-        """,
-        (
-            job_id,
-            user["id"]
+    try:
+        conn.execute(
+            """
+            INSERT INTO applications
+            (job_id,user_id,cover_letter,status,created_at)
+            VALUES(?,?,?,?,?)
+            """,
+            (
+                job_id,
+                user["id"],
+                cover_letter.strip(),
+                "Applied",
+                now_iso()
+            )
         )
-    ).fetchone()
 
-    if existing:
+        conn.commit()
 
+    except sqlite3.IntegrityError:
         conn.close()
 
-        raise HTTPException(
-            409,
-            "You already applied for this job"
+        return RedirectResponse(
+            "/applications",
+            status_code=303
         )
-
-    resume = (
-        data.resume.strip()
-        or user["resume"]
-        or ""
-    )
-
-    conn.execute("""
-        INSERT INTO applications
-        (
-            job_id,
-            user_id,
-            cover_letter,
-            resume,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        job_id,
-        user["id"],
-        data.cover_letter.strip(),
-        resume,
-        "Applied",
-        now()
-    ))
-
-    conn.commit()
 
     conn.close()
 
-    return {
-        "ok": True,
-        "message": "Application submitted successfully"
-    }
+    return RedirectResponse(
+        "/applications",
+        status_code=303
+    )
 
 
 # =========================================================
-# APPLICATIONS
+# MY APPLICATIONS
 # =========================================================
 
-@app.get("/api/applications")
+@app.get("/applications", response_class=HTMLResponse)
 def applications(request: Request):
+    user = get_user(request)
 
-    user = require_user(request)
+    if not user:
+        return redirect_login(
+            "Please login first."
+        )
 
     conn = db()
 
-    if user["role"] == "jobseeker":
-
-        rows = conn.execute("""
-            SELECT
-                a.*,
-                j.title,
-                j.company,
-                j.location,
-                j.job_type
-            FROM applications a
-            JOIN jobs j
-                ON j.id=a.job_id
-            WHERE a.user_id=?
-            ORDER BY a.id DESC
-        """, (
-            user["id"],
-        )).fetchall()
-
-    else:
-
-        rows = conn.execute("""
-            SELECT
-                a.*,
-                j.title,
-                j.company,
-                j.location,
-                j.job_type,
-                u.name applicant_name,
-                u.email applicant_email,
-                u.phone applicant_phone
-            FROM applications a
-            JOIN jobs j
-                ON j.id=a.job_id
-            JOIN users u
-                ON u.id=a.user_id
-            WHERE j.employer_id=?
-            ORDER BY a.id DESC
-        """, (
-            user["id"],
-        )).fetchall()
-
-    result = [
-        dict(row)
-        for row in rows
-    ]
+    rows = conn.execute("""
+        SELECT
+            applications.*,
+            jobs.title,
+            jobs.company,
+            jobs.location
+        FROM applications
+        JOIN jobs ON jobs.id=applications.job_id
+        WHERE applications.user_id=?
+        ORDER BY applications.id DESC
+    """, (user["id"],)).fetchall()
 
     conn.close()
 
-    return {
-        "applications": result
-    }
+    content = ""
 
+    for row in rows:
+        content += f"""
+        <div class="job">
 
-# =========================================================
-# UPDATE APPLICATION STATUS
-# =========================================================
+            <h3>
+                {html.escape(row["title"])}
+            </h3>
 
-@app.patch("/api/applications/{application_id}")
-def update_application(
-    application_id: int,
-    data: StatusIn,
-    request: Request
-):
+            <div class="company">
+                {html.escape(row["company"])}
+            </div>
 
-    user = require_user(request)
+            <div class="meta">
+                📍 {html.escape(row["location"] or "India")}
+            </div>
 
-    allowed = {
-        "Applied",
-        "Under Review",
-        "Shortlisted",
-        "Interview",
-        "Selected",
-        "Rejected"
-    }
+            <span class="badge">
+                {html.escape(row["status"])}
+            </span>
 
-    if data.status not in allowed:
+            <p>
+                Applied on:
+                {html.escape(row["created_at"][:10])}
+            </p>
 
-        raise HTTPException(
-            400,
-            "Invalid application status"
-        )
-
-    conn = db()
-
-    row = conn.execute("""
-        SELECT
-            a.*,
-            j.employer_id
-        FROM applications a
-        JOIN jobs j
-            ON j.id=a.job_id
-        WHERE a.id=?
-    """, (
-        application_id,
-    )).fetchone()
-
-    if not row:
-
-        conn.close()
-
-        raise HTTPException(
-            404,
-            "Application not found"
-        )
-
-    if row["employer_id"] != user["id"]:
-
-        conn.close()
-
-        raise HTTPException(
-            403,
-            "Only the employer can update status"
-        )
-
-    conn.execute(
+        </div>
         """
-        UPDATE applications
-        SET status=?
-        WHERE id=?
-        """,
-        (
-            data.status,
-            application_id
-        )
+
+    if not content:
+        content = """
+        <div class="card empty">
+
+            <h2>No applications yet</h2>
+
+            <p>
+                Find a job and click Apply Now.
+            </p>
+
+            <a class="btn" href="/jobs">
+                Find Jobs
+            </a>
+
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+
+        <h1>My Applications</h1>
+
+        <p>
+            Track the jobs you have applied for.
+        </p>
+
+    </div>
+
+    <div class="job-grid">
+        {content}
+    </div>
+    """
+
+    return layout(
+        "My Applications",
+        body,
+        user
     )
 
-    conn.commit()
-
-    conn.close()
-
-    return {
-        "ok": True,
-        "message": "Application status updated"
-    }
-
 
 # =========================================================
-# EMPLOYER JOBS
+# MY JOBS
 # =========================================================
 
-@app.get("/api/my-jobs")
+@app.get("/my-jobs", response_class=HTMLResponse)
 def my_jobs(request: Request):
+    user = get_user(request)
 
-    user = require_user(request)
+    if not user:
+        return redirect_login()
 
     if user["role"] != "employer":
-
-        raise HTTPException(
-            403,
-            "Employer account required"
+        return HTMLResponse(
+            layout(
+                "Access Denied",
+                """
+                <div class="card alert">
+                    Employer account required.
+                </div>
+                """,
+                user
+            ),
+            status_code=403
         )
 
     conn = db()
@@ -1607,3378 +2853,381 @@ def my_jobs(request: Request):
         WHERE employer_id=?
         ORDER BY id DESC
         """,
-        (
-            user["id"],
-        )
+        (user["id"],)
     ).fetchall()
 
-    result = [
-        job_json(row)
-        for row in rows
-    ]
-
     conn.close()
 
-    return {
-        "jobs": result
-    }
+    content = ""
 
+    for row in rows:
+        content += f"""
+        <div class="job">
 
-# =========================================================
-# CLOSE JOB
-# =========================================================
+            <h3>
+                {html.escape(row["title"])}
+            </h3>
 
-@app.delete("/api/jobs/{job_id}")
-def close_job(
-    job_id: int,
-    request: Request
-):
+            <div class="company">
+                {html.escape(row["company"])}
+            </div>
 
-    user = require_user(request)
+            <div class="meta">
+                📍 {html.escape(row["location"])}
+            </div>
 
-    conn = db()
+            <span class="badge">
+                {html.escape(row["status"])}
+            </span>
 
-    row = conn.execute(
-        "SELECT * FROM jobs WHERE id=?",
-        (job_id,)
-    ).fetchone()
+            <br><br>
 
-    if not row:
+            <a
+                class="btn"
+                href="/job/{row['id']}"
+            >
+                View Job
+            </a>
 
-        conn.close()
+            <a
+                class="btn secondary"
+                href="/job-applications/{row['id']}"
+            >
+                View Applicants
+            </a>
 
-        raise HTTPException(
-            404,
-            "Job not found"
-        )
-
-    if row["employer_id"] != user["id"]:
-
-        conn.close()
-
-        raise HTTPException(
-            403,
-            "You can close only your own job"
-        )
-
-    conn.execute(
+        </div>
         """
-        UPDATE jobs
-        SET status='closed'
-        WHERE id=?
-        """,
-        (job_id,)
+
+    if not content:
+        content = """
+        <div class="card empty">
+
+            <h2>No jobs posted</h2>
+
+            <a class="btn" href="/post-job">
+                Post Your First Job
+            </a>
+
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+
+        <h1>My Jobs</h1>
+
+    </div>
+
+    <div class="job-grid">
+        {content}
+    </div>
+    """
+
+    return layout(
+        "My Jobs",
+        body,
+        user
     )
 
-    conn.commit()
+
+# =========================================================
+# JOB APPLICANTS
+# =========================================================
+
+@app.get(
+    "/job-applications/{job_id}",
+    response_class=HTMLResponse
+)
+def job_applications(
+    request: Request,
+    job_id: int
+):
+    user = get_user(request)
+
+    if not user:
+        return redirect_login()
+
+    if user["role"] != "employer":
+        return HTMLResponse(
+            layout(
+                "Access Denied",
+                """
+                <div class="card alert">
+                    Employer account required.
+                </div>
+                """,
+                user
+            ),
+            status_code=403
+        )
+
+    conn = db()
+
+    job = conn.execute(
+        """
+        SELECT *
+        FROM jobs
+        WHERE id=? AND employer_id=?
+        """,
+        (job_id, user["id"])
+    ).fetchone()
+
+    if not job:
+        conn.close()
+
+        return HTMLResponse(
+            layout(
+                "Job Not Found",
+                """
+                <div class="card alert">
+                    Job not found.
+                </div>
+                """,
+                user
+            ),
+            status_code=404
+        )
+
+    rows = conn.execute(
+        """
+        SELECT
+            applications.*,
+            users.name,
+            users.email,
+            users.phone,
+            users.location
+        FROM applications
+        JOIN users
+        ON users.id=applications.user_id
+        WHERE applications.job_id=?
+        ORDER BY applications.id DESC
+        """,
+        (job_id,)
+    ).fetchall()
 
     conn.close()
 
+    content = ""
+
+    for row in rows:
+        content += f"""
+        <div class="card">
+
+            <h2>
+                {html.escape(row["name"])}
+            </h2>
+
+            <p>
+                📧 {html.escape(row["email"])}
+            </p>
+
+            <p>
+                📱 {html.escape(row["phone"] or "Not provided")}
+            </p>
+
+            <p>
+                📍 {html.escape(row["location"] or "Not provided")}
+            </p>
+
+            <span class="badge">
+                {html.escape(row["status"])}
+            </span>
+
+            <h3>Cover Letter</h3>
+
+            <p style="white-space:pre-wrap">
+                {html.escape(
+                    row["cover_letter"]
+                    or "No cover letter provided."
+                )}
+            </p>
+
+        </div>
+        """
+
+    if not content:
+        content = """
+        <div class="card empty">
+
+            <h2>No applications yet</h2>
+
+            <p>
+                Applicants will appear here.
+            </p>
+
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+
+        <h1>
+            Applicants
+        </h1>
+
+        <p>
+            Job:
+            <strong>
+                {html.escape(job["title"])}
+            </strong>
+        </p>
+
+    </div>
+
+    {content}
+    """
+
+    return layout(
+        "Applicants",
+        body,
+        user
+    )
+
+
+# =========================================================
+# LOGOUT
+# =========================================================
+
+@app.post("/logout")
+def logout(request: Request):
+    logout_session(request)
+
+    response = RedirectResponse(
+        "/",
+        status_code=303
+    )
+
+    response.delete_cookie(
+        "jobmart_session"
+    )
+
+    return response
+
+
+# =========================================================
+# API - CURRENT USER
+# =========================================================
+
+@app.get("/api/me")
+def api_me(request: Request):
+    user = get_user(request)
+
+    if not user:
+        return JSONResponse({
+            "logged_in": False
+        })
+
     return {
-        "ok": True,
-        "message": "Job closed"
+        "logged_in": True,
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": user["role"],
+            "phone": user["phone"],
+            "location": user["location"]
+        }
     }
 
 
 # =========================================================
-# DASHBOARD
+# API - JOBS
 # =========================================================
 
-@app.get("/api/dashboard")
-def dashboard(request: Request):
+@app.get("/api/jobs")
+def api_jobs(
+    q: str = "",
+    country: str = "",
+    job_type: str = ""
+):
+    query = """
+        SELECT *
+        FROM jobs
+        WHERE status='active'
+    """
 
-    user = require_user(request)
+    params = []
+
+    if q.strip():
+        value = "%" + q.strip() + "%"
+
+        query += """
+        AND (
+            title LIKE ?
+            OR company LIKE ?
+            OR skills LIKE ?
+            OR description LIKE ?
+            OR location LIKE ?
+        )
+        """
+
+        params.extend([
+            value,
+            value,
+            value,
+            value,
+            value
+        ])
+
+    if country.strip():
+        query += " AND country=?"
+        params.append(country.strip())
+
+    if job_type.strip():
+        query += " AND job_type=?"
+        params.append(job_type.strip())
+
+    query += " ORDER BY id DESC"
 
     conn = db()
 
-    if user["role"] == "employer":
-
-        jobs = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM jobs
-            WHERE employer_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        active = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM jobs
-            WHERE employer_id=?
-            AND status='active'
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        applications = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM applications a
-            JOIN jobs j
-                ON j.id=a.job_id
-            WHERE j.employer_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        selected = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM applications a
-            JOIN jobs j
-                ON j.id=a.job_id
-            WHERE j.employer_id=?
-            AND a.status='Selected'
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        result = {
-            "role": "employer",
-            "jobs": jobs,
-            "active_jobs": active,
-            "applications": applications,
-            "selected": selected
-        }
-
-    else:
-
-        applications = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM applications
-            WHERE user_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        saved = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM saved_jobs
-            WHERE user_id=?
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        selected = conn.execute(
-            """
-            SELECT COUNT(*) c
-            FROM applications
-            WHERE user_id=?
-            AND status='Selected'
-            """,
-            (user["id"],)
-        ).fetchone()["c"]
-
-        result = {
-            "role": "jobseeker",
-            "applications": applications,
-            "saved": saved,
-            "selected": selected
-        }
+    rows = conn.execute(
+        query,
+        params
+    ).fetchall()
 
     conn.close()
 
-    return result
+    return {
+        "count": len(rows),
+        "jobs": [dict(row) for row in rows]
+    }
 
 
 # =========================================================
-# HEALTH
+# HEALTH CHECK
 # =========================================================
 
 @app.get("/health")
 def health():
-
     return {
-        "ok": True,
-        "service": "Job Mart",
-        "version": "2.0"
+        "status": "ok",
+        "app": "Job Mart",
+        "database": "connected"
     }
 
 
 # =========================================================
-# FRONTEND
+# RUN
 # =========================================================
 
-HTML = r"""
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"
->
-
-<title>Job Mart</title>
-
-<style>
-
-*{
-    box-sizing:border-box;
-}
-
-body{
-    margin:0;
-    background:#f3f6fa;
-    color:#172033;
-    font-family:Arial,Helvetica,sans-serif;
-}
-
-.top{
-    background:#147bea;
-    color:white;
-    position:sticky;
-    top:0;
-    z-index:50;
-    box-shadow:0 3px 15px #0002;
-}
-
-.nav{
-    max-width:1200px;
-    margin:auto;
-    padding:12px 18px;
-    display:flex;
-    align-items:center;
-    gap:15px;
-}
-
-.logo{
-    font-size:30px;
-    font-weight:800;
-}
-
-.tag{
-    flex:1;
-    font-size:14px;
-}
-
-.nav button{
-    border:0;
-    background:white;
-    color:#147bea;
-    border-radius:9px;
-    padding:12px 20px;
-    font-weight:bold;
-}
-
-.searchbar{
-    max-width:1200px;
-    margin:auto;
-    padding:0 18px 14px;
-    display:flex;
-    gap:8px;
-}
-
-.searchbar input{
-    flex:1;
-    border:0;
-    border-radius:10px;
-    padding:15px;
-    outline:none;
-}
-
-.searchbar button{
-    width:60px;
-    border:0;
-    border-radius:10px;
-    background:white;
-    font-size:23px;
-}
-
-.wrap{
-    max-width:1200px;
-    margin:25px auto;
-    padding:0 18px;
-}
-
-.tabs{
-    display:flex;
-    gap:8px;
-    overflow:auto;
-    margin-bottom:18px;
-}
-
-.tabs button{
-    border:1px solid #dce3ed;
-    background:white;
-    border-radius:10px;
-    padding:12px 17px;
-    white-space:nowrap;
-}
-
-.card{
-    background:white;
-    border:1px solid #dce3ed;
-    border-radius:16px;
-    padding:24px;
-    margin-bottom:18px;
-    box-shadow:0 5px 18px #17203312;
-}
-
-.hero{
-    padding:45px 35px;
-}
-
-.hero h1{
-    font-size:50px;
-    margin:0 0 15px;
-}
-
-.hero p{
-    color:#687386;
-    font-size:19px;
-}
-
-.grid{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:16px;
-}
-
-.formgrid{
-    display:grid;
-    grid-template-columns:repeat(2,1fr);
-    gap:14px;
-}
-
-label{
-    display:block;
-    font-weight:bold;
-    margin:8px 0;
-}
-
-input,
-select,
-textarea{
-    width:100%;
-    padding:13px;
-    border:1px solid #cbd4e1;
-    border-radius:9px;
-    background:white;
-}
-
-textarea{
-    min-height:120px;
-    resize:vertical;
-}
-
-.primary,
-.secondary,
-.danger,
-.success{
-    border:0;
-    border-radius:9px;
-    padding:12px 18px;
-    margin:4px;
-}
-
-.primary{
-    background:#147bea;
-    color:white;
-}
-
-.secondary{
-    background:#eef3fa;
-    color:#17304d;
-}
-
-.danger{
-    background:#ffeaea;
-    color:#b52f2f;
-}
-
-.success{
-    background:#e7f8ef;
-    color:#11713e;
-}
-
-.job h3{
-    margin-bottom:7px;
-}
-
-.company{
-    color:#147bea;
-    font-weight:bold;
-}
-
-.meta{
-    display:flex;
-    flex-wrap:wrap;
-    gap:7px;
-    margin:12px 0;
-}
-
-.badge{
-    background:#eef4ff;
-    border-radius:20px;
-    padding:6px 10px;
-    font-size:13px;
-}
-
-.stat{
-    font-size:34px;
-    font-weight:bold;
-    color:#147bea;
-}
-
-.muted{
-    color:#687386;
-}
-
-.msg{
-    padding:12px;
-    border-radius:9px;
-    margin:10px 0;
-}
-
-.error{
-    background:#fff0f0;
-    color:#c33;
-}
-
-.ok{
-    background:#ecfff4;
-    color:#168047;
-}
-
-.empty{
-    text-align:center;
-    color:#687386;
-    padding:40px;
-}
-
-.hide{
-    display:none!important;
-}
-
-.modal{
-    position:fixed;
-    inset:0;
-    background:#0008;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    padding:18px;
-    z-index:100;
-}
-
-.modalbox{
-    background:white;
-    width:100%;
-    max-width:650px;
-    max-height:90vh;
-    overflow:auto;
-    border-radius:16px;
-    padding:25px;
-}
-
-.close{
-    float:right;
-    border:0;
-    border-radius:50%;
-    width:35px;
-    height:35px;
-    font-size:20px;
-}
-
-footer{
-    text-align:center;
-    padding:30px;
-    color:#687386;
-}
-
-@media(max-width:750px){
-
-    .logo{
-        font-size:26px;
-    }
-
-    .tag{
-        display:none;
-    }
-
-    .wrap{
-        padding:0 10px;
-    }
-
-    .card{
-        padding:18px;
-    }
-
-    .hero{
-        padding:28px 20px;
-    }
-
-    .hero h1{
-        font-size:40px;
-    }
-
-    .grid,
-    .formgrid{
-        grid-template-columns:1fr;
-    }
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<header class="top">
-
-<div class="nav">
-
-<div class="logo">
-Job Mart
-</div>
-
-<div class="tag">
-Find • Apply • Grow
-</div>
-
-<button id="authBtn"
-onclick="showPage('login')">
-Login
-</button>
-
-</div>
-
-<div class="searchbar">
-
-<input
-id="globalSearch"
-placeholder="Search jobs, companies, skills..."
-onkeydown="if(event.key==='Enter')doSearch()"
->
-
-<button onclick="doSearch()">
-🔍
-</button>
-
-</div>
-
-</header>
-
-<main class="wrap">
-
-<div
-id="tabs"
-class="tabs">
-</div>
-
-<section id="app">
-</section>
-
-</main>
-
-<footer>
-Job Mart • Find jobs • Apply online • Build your career
-</footer>
-
-<div
-id="modal"
-class="modal hide"
-onclick="if(event.target.id==='modal')closeModal()"
->
-
-<div class="modalbox">
-
-<button
-class="close"
-onclick="closeModal()">
-×
-</button>
-
-<div id="modalContent">
-</div>
-
-</div>
-
-</div>
-
-
-<script>
-
-let token =
-localStorage.getItem("jobmart_token") || "";
-
-let me = null;
-
-
-async function api(url,options={}){
-
-    options.headers =
-        Object.assign(
-            {"Content-Type":"application/json"},
-            options.headers || {}
-        );
-
-    if(token){
-
-        options.headers["X-Session-Token"]
-            = token;
-
-    }
-
-    const response =
-        await fetch(url,options);
-
-    let data={};
-
-    try{
-        data=await response.json();
-    }
-    catch(e){}
-
-    if(!response.ok){
-
-        throw new Error(
-            data.detail ||
-            "Something went wrong"
-        );
-
-    }
-
-    return data;
-}
-
-
-function esc(value){
-
-    return String(value ?? "")
-        .replace(/[&<>"']/g,function(c){
-
-            return {
-                "&":"&amp;",
-                "<":"&lt;",
-                ">":"&gt;",
-                '"':"&quot;",
-                "'":"&#039;"
-            }[c];
-
-        });
-
-}
-
-
-function message(text,type="msg"){
-
-    return `
-    <div class="msg ${type}">
-        ${esc(text)}
-    </div>
-    `;
-
-}
-
-
-function closeModal(){
-
-    document
-        .getElementById("modal")
-        .classList.add("hide");
-
-}
-
-
-function openModal(html){
-
-    document
-        .getElementById("modalContent")
-        .innerHTML=html;
-
-    document
-        .getElementById("modal")
-        .classList.remove("hide");
-
-}
-
-
-async function refreshMe(){
-
-    try{
-
-        const d =
-            await api("/api/me");
-
-        me=d.user;
-
-    }
-    catch(e){
-
-        me=null;
-
-    }
-
-    renderTabs();
-
-    document
-        .getElementById("authBtn")
-        .textContent =
-        me
-        ? "Hi, "+me.name.split(" ")[0]
-        : "Login";
-
-}
-
-
-function renderTabs(){
-
-    const t =
-        document.getElementById("tabs");
-
-    if(!me){
-
-        t.innerHTML="";
-
-        return;
-
-    }
-
-    let items;
-
-    if(me.role==="employer"){
-
-        items=[
-            ["home","Home"],
-            ["jobs","Jobs"],
-            ["post","Post Job"],
-            ["applications","Applications"],
-            ["dashboard","Dashboard"],
-            ["profile","Profile"]
-        ];
-
-    }
-    else{
-
-        items=[
-            ["home","Home"],
-            ["jobs","Jobs"],
-            ["saved","Saved"],
-            ["applications","Applications"],
-            ["dashboard","Dashboard"],
-            ["profile","Profile"]
-        ];
-
-    }
-
-    t.innerHTML =
-        items.map(
-            x=>`
-            <button
-            onclick="showPage('${x[0]}')">
-            ${x[1]}
-            </button>
-            `
-        ).join("")
-        +
-        `
-        <button onclick="logout()">
-        Logout
-        </button>
-        `;
-
-}
-
-
-async function logout(){
-
-    await api(
-        "/api/logout",
-        {
-            method:"POST"
-        }
-    ).catch(()=>{});
-
-    token="";
-
-    localStorage.removeItem(
-        "jobmart_token"
-    );
-
-    me=null;
-
-    renderTabs();
-
-    showPage("home");
-
-}
-
-
-function showPage(page){
-
-    if(page==="home")
-        renderHome();
-
-    else if(page==="login")
-        renderLogin();
-
-    else if(page==="register")
-        renderRegister();
-
-    else if(page==="jobs")
-        renderJobs();
-
-    else if(page==="saved")
-        renderSaved();
-
-    else if(page==="applications")
-        renderApplications();
-
-    else if(page==="profile")
-        renderProfile();
-
-    else if(page==="post")
-        renderPost();
-
-    else if(page==="dashboard")
-        renderDashboard();
-
-}
-
-
-async function init(){
-
-    await refreshMe();
-
-    showPage("home");
-
-}
-
-
-function renderHome(){
-
-    renderTabs();
-
-    document
-    .getElementById("app")
-    .innerHTML=`
-
-    <div class="card hero">
-
-        <h1>
-        Find your next opportunity 🚀
-        </h1>
-
-        <p>
-        Search jobs, discover companies,
-        save opportunities and apply online.
-        </p>
-
-        <div class="formgrid">
-
-            <input
-            id="homeQuery"
-            placeholder="Job title, company, skills"
-            >
-
-            <select id="homeCountry">
-
-                <option>
-                All countries
-                </option>
-
-                ${[
-                    "India",
-                    "United States",
-                    "United Kingdom",
-                    "Canada",
-                    "Australia",
-                    "Germany",
-                    "UAE",
-                    "Singapore",
-                    "Other"
-                ].map(
-                    x=>`<option>${x}</option>`
-                ).join("")}
-
-            </select>
-
-        </div>
-
-        <button
-        class="primary"
-        onclick="homeSearch()">
-        Search Jobs
-        </button>
-
-    </div>
-
-
-    <div class="grid">
-
-        <div class="card">
-
-            <div class="stat">
-            🔎
-            </div>
-
-            <h3>
-            Smart Search
-            </h3>
-
-            <p class="muted">
-            Search by title, company,
-            skills and location.
-            </p>
-
-        </div>
-
-
-        <div class="card">
-
-            <div class="stat">
-            💾
-            </div>
-
-            <h3>
-            Save Jobs
-            </h3>
-
-            <p class="muted">
-            Save interesting jobs.
-            </p>
-
-        </div>
-
-
-        <div class="card">
-
-            <div class="stat">
-            📄
-            </div>
-
-            <h3>
-            Apply Online
-            </h3>
-
-            <p class="muted">
-            Apply and track status.
-            </p>
-
-        </div>
-
-    </div>
-
-
-    <div class="card">
-
-        <h2>
-        Latest Jobs
-        </h2>
-
-        <div id="latestJobs">
-        Loading...
-        </div>
-
-    </div>
-    `;
-
-    loadLatestJobs();
-
-}
-
-
-function homeSearch(){
-
-    const q =
-        document.getElementById(
-            "homeQuery"
-        ).value;
-
-    document.getElementById(
-        "globalSearch"
-    ).value=q;
-
-    showPage("jobs");
-
-}
-
-
-async function loadLatestJobs(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs?limit=6"
-            );
-
-        document.getElementById(
-            "latestJobs"
-        ).innerHTML =
-            d.jobs.length
-            ? d.jobs.map(jobCard).join("")
-            : `
-            <div class="empty">
-            No jobs posted yet.
-            </div>
-            `;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "latestJobs"
-        ).innerHTML =
-            message(e.message,"error");
-
-    }
-
-}
-
-
-function doSearch(){
-
-    showPage("jobs");
-
-}
-
-
-function renderJobs(){
-
-    renderTabs();
-
-    document
-    .getElementById("app")
-    .innerHTML=`
-
-    <div class="card">
-
-        <h2>
-        Find Jobs
-        </h2>
-
-        <div class="formgrid">
-
-            <input
-            id="jobQuery"
-            value="${esc(
-                document.getElementById(
-                    "globalSearch"
-                ).value
-            )}"
-            placeholder="Title, company, skills"
-            >
-
-            <input
-            id="jobLocation"
-            placeholder="Location"
-            >
-
-            <select id="jobCountry">
-
-                <option>
-                All countries
-                </option>
-
-                ${[
-                    "India",
-                    "United States",
-                    "United Kingdom",
-                    "Canada",
-                    "Australia",
-                    "Germany",
-                    "UAE",
-                    "Singapore",
-                    "Other"
-                ].map(
-                    x=>`<option>${x}</option>`
-                ).join("")}
-
-            </select>
-
-            <select id="jobType">
-
-                <option>
-                All job types
-                </option>
-
-                ${[
-                    "Full-time",
-                    "Part-time",
-                    "Contract",
-                    "Internship",
-                    "Freelance"
-                ].map(
-                    x=>`<option>${x}</option>`
-                ).join("")}
-
-            </select>
-
-            <select id="workMode">
-
-                <option>
-                All work modes
-                </option>
-
-                ${[
-                    "On-site",
-                    "Hybrid",
-                    "Remote"
-                ].map(
-                    x=>`<option>${x}</option>`
-                ).join("")}
-
-            </select>
-
-        </div>
-
-        <button
-        class="primary"
-        onclick="loadJobs()">
-        Search
-        </button>
-
-    </div>
-
-    <div id="jobResults">
-    </div>
-
-    `;
-
-    loadJobs();
-
-}
-
-
-async function loadJobs(){
-
-    const q =
-        document.getElementById(
-            "jobQuery"
-        )?.value || "";
-
-    const location =
-        document.getElementById(
-            "jobLocation"
-        )?.value || "";
-
-    const country =
-        document.getElementById(
-            "jobCountry"
-        )?.value || "";
-
-    const type =
-        document.getElementById(
-            "jobType"
-        )?.value || "";
-
-    const mode =
-        document.getElementById(
-            "workMode"
-        )?.value || "";
-
-    const params =
-        new URLSearchParams({
-            q,
-            location,
-            country,
-            job_type:type,
-            work_mode:mode,
-            limit:"30"
-        });
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs?"+params
-            );
-
-        document.getElementById(
-            "jobResults"
-        ).innerHTML =
-            d.jobs.length
-            ? d.jobs.map(jobCard).join("")
-            : `
-            <div class="card empty">
-            <h2>No matching jobs</h2>
-            <p>
-            Try another title, company,
-            skill or location.
-            </p>
-            </div>
-            `;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "jobResults"
-        ).innerHTML =
-            message(e.message,"error");
-
-    }
-
-}
-
-
-function jobCard(j){
-
-    let salary="Salary not specified";
-
-    if(j.salary_min || j.salary_max){
-
-        salary =
-            "₹"
-            +Number(
-                j.salary_min || 0
-            ).toLocaleString()
-            +" - ₹"
-            +Number(
-                j.salary_max || 0
-            ).toLocaleString();
-
-    }
-
-    return `
-
-    <div class="card">
-
-        <h3>
-        ${esc(j.title)}
-        </h3>
-
-        <div class="company">
-        ${esc(j.company)}
-        </div>
-
-        <div class="meta">
-
-            <span class="badge">
-            📍 ${esc(
-                j.location ||
-                j.country
-            )}
-            </span>
-
-            <span class="badge">
-            ${esc(j.job_type)}
-            </span>
-
-            <span class="badge">
-            ${esc(j.work_mode)}
-            </span>
-
-            <span class="badge">
-            💰 ${salary}
-            </span>
-
-        </div>
-
-        <p>
-        ${esc(
-            j.description.slice(
-                0,
-                300
-            )
-        )}
-        </p>
-
-        <button
-        class="primary"
-        onclick="viewJob(${j.id})">
-        View Job
-        </button>
-
-        ${
-            me
-            ?
-            `
-            <button
-            class="secondary"
-            onclick="saveJob(${j.id})">
-            ${j.saved ? "★ Saved" : "☆ Save"}
-            </button>
-            `
-            :
-            ""
-        }
-
-        ${
-            me &&
-            me.role==="jobseeker"
-            ?
-            `
-            <button
-            class="success"
-            onclick="applyJob(${j.id})">
-            ${j.applied ? "Applied" : "Apply Now"}
-            </button>
-            `
-            :
-            ""
-        }
-
-    </div>
-
-    `;
-
-}
-
-
-async function viewJob(id){
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs/"+id
-            );
-
-        const j=d.job;
-
-        openModal(`
-
-        <h2>
-        ${esc(j.title)}
-        </h2>
-
-        <h3 class="company">
-        ${esc(j.company)}
-        </h3>
-
-        <div class="meta">
-
-        <span class="badge">
-        📍 ${esc(
-            j.location ||
-            j.country
-        )}
-        </span>
-
-        <span class="badge">
-        ${esc(j.job_type)}
-        </span>
-
-        <span class="badge">
-        ${esc(j.work_mode)}
-        </span>
-
-        </div>
-
-        <h3>
-        Description
-        </h3>
-
-        <p>
-        ${esc(
-            j.description
-        ).replace(
-            /\n/g,
-            "<br>"
-        )}
-        </p>
-
-        <h3>
-        Skills
-        </h3>
-
-        <p>
-        ${esc(
-            j.skills ||
-            "Not specified"
-        )}
-        </p>
-
-        <h3>
-        Experience
-        </h3>
-
-        <p>
-        ${esc(
-            j.experience ||
-            "Not specified"
-        )}
-        </p>
-
-        <h3>
-        Education
-        </h3>
-
-        <p>
-        ${esc(
-            j.education ||
-            "Not specified"
-        )}
-        </p>
-
-        ${
-            me &&
-            me.role==="jobseeker"
-            ?
-            `
-            <button
-            class="primary"
-            onclick="
-                closeModal();
-                applyJob(${j.id})
-            ">
-            Apply Now
-            </button>
-            `
-            :
-            ""
-        }
-
-        <button
-        class="secondary"
-        onclick="closeModal()">
-        Close
-        </button>
-
-        `);
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-async function saveJob(id){
-
-    if(!me){
-
-        alert(
-            "Please login first"
-        );
-
-        showPage("login");
-
-        return;
-    }
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs/"+id+"/save",
-                {
-                    method:"POST"
-                }
-            );
-
-        alert(d.message);
-
-        showPage("jobs");
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-async function applyJob(id){
-
-    if(!me){
-
-        alert(
-            "Please login first"
-        );
-
-        showPage("login");
-
-        return;
-    }
-
-    if(me.role!=="jobseeker"){
-
-        alert(
-            "Only job seekers can apply"
-        );
-
-        return;
-    }
-
-    openModal(`
-
-    <h2>
-    Apply for Job
-    </h2>
-
-    <label>
-    Cover Letter
-    </label>
-
-    <textarea
-    id="coverLetter"
-    placeholder="Tell the employer why you are suitable...">
-    </textarea>
-
-    <label>
-    Resume / CV
-    </label>
-
-    <textarea
-    id="resumeText"
-    placeholder="Paste resume text or resume link..."
-    >${esc(
-        me.resume || ""
-    )}</textarea>
-
-    <button
-    class="primary"
-    onclick="submitApplication(${id})">
-    Submit Application
-    </button>
-
-    `);
-
-}
-
-
-async function submitApplication(id){
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs/"+id+"/apply",
-                {
-                    method:"POST",
-                    body:JSON.stringify({
-
-                        cover_letter:
-                            document.getElementById(
-                                "coverLetter"
-                            ).value,
-
-                        resume:
-                            document.getElementById(
-                                "resumeText"
-                            ).value
-
-                    })
-                }
-            );
-
-        closeModal();
-
-        alert(d.message);
-
-        showPage(
-            "applications"
-        );
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-function renderLogin(){
-
-    renderTabs();
-
-    document.getElementById(
-        "app"
-    ).innerHTML=`
-
-    <div
-    class="card"
-    style="max-width:650px;margin:auto">
-
-        <h1>
-        Welcome Back 👋
-        </h1>
-
-        <div class="tabs">
-
-            <button
-            id="passwordTab"
-            onclick="loginMode('password')">
-            Password
-            </button>
-
-            <button
-            id="otpTab"
-            onclick="loginMode('otp')">
-            OTP Login
-            </button>
-
-        </div>
-
-        <div id="loginBox">
-        </div>
-
-        <div id="loginMessage">
-        </div>
-
-    </div>
-
-    `;
-
-    loginMode("password");
-
-}
-
-
-function loginMode(mode){
-
-    document.getElementById(
-        "passwordTab"
-    ).style.background =
-        mode==="password"
-        ? "#147bea"
-        : "";
-
-    document.getElementById(
-        "passwordTab"
-    ).style.color =
-        mode==="password"
-        ? "white"
-        : "";
-
-    document.getElementById(
-        "otpTab"
-    ).style.background =
-        mode==="otp"
-        ? "#147bea"
-        : "";
-
-    document.getElementById(
-        "otpTab"
-    ).style.color =
-        mode==="otp"
-        ? "white"
-        : "";
-
-
-    if(mode==="password"){
-
-        document.getElementById(
-            "loginBox"
-        ).innerHTML=`
-
-        <label>
-        Email
-        </label>
-
-        <input
-        id="loginEmail"
-        type="email"
-        placeholder="you@example.com"
-        >
-
-        <label>
-        Password
-        </label>
-
-        <input
-        id="loginPassword"
-        type="password"
-        placeholder="Password"
-        >
-
-        <button
-        class="primary"
-        onclick="doLogin()">
-        Login
-        </button>
-
-        <button
-        class="secondary"
-        onclick="forgotPassword()">
-        Forgot Password?
-        </button>
-
-        <button
-        class="secondary"
-        onclick="showPage('register')">
-        Create Account
-        </button>
-
-        `;
-
-    }
-    else{
-
-        document.getElementById(
-            "loginBox"
-        ).innerHTML=`
-
-        <label>
-        Email
-        </label>
-
-        <input
-        id="otpEmail"
-        type="email"
-        placeholder="you@example.com"
-        >
-
-        <button
-        class="secondary"
-        onclick="sendOTP()">
-        Send OTP
-        </button>
-
-        <label>
-        6-digit OTP
-        </label>
-
-        <input
-        id="otpCode"
-        maxlength="6"
-        inputmode="numeric"
-        placeholder="123456"
-        >
-
-        <button
-        class="primary"
-        onclick="doOTPLogin()">
-        Login with OTP
-        </button>
-
-        <button
-        class="secondary"
-        onclick="showPage('register')">
-        Create Account
-        </button>
-
-        `;
-
-    }
-
-}
-
-
-async function doLogin(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/login",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        email:
-                            document.getElementById(
-                                "loginEmail"
-                            ).value,
-
-                        password:
-                            document.getElementById(
-                                "loginPassword"
-                            ).value
-
-                    })
-                }
-            );
-
-        token=d.token;
-
-        localStorage.setItem(
-            "jobmart_token",
-            token
-        );
-
-        me=d.user;
-
-        renderTabs();
-
-        showPage("home");
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "loginMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function sendOTP(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/send-otp",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        email:
-                            document.getElementById(
-                                "otpEmail"
-                            ).value
-
-                    })
-                }
-            );
-
-        document.getElementById(
-            "loginMessage"
-        ).innerHTML =
-            message(
-                "Your demo OTP is: "
-                + d.demo_otp,
-                "ok"
-            );
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "loginMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function doOTPLogin(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/login-otp",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        email:
-                            document.getElementById(
-                                "otpEmail"
-                            ).value,
-
-                        otp:
-                            document.getElementById(
-                                "otpCode"
-                            ).value
-
-                    })
-                }
-            );
-
-        token=d.token;
-
-        localStorage.setItem(
-            "jobmart_token",
-            token
-        );
-
-        me=d.user;
-
-        renderTabs();
-
-        showPage("home");
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "loginMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-function renderRegister(){
-
-    document.getElementById(
-        "app"
-    ).innerHTML=`
-
-    <div
-    class="card"
-    style="max-width:700px;margin:auto">
-
-        <h1>
-        Create Job Mart Account
-        </h1>
-
-        <div class="formgrid">
-
-            <div>
-
-                <label>
-                Full Name
-                </label>
-
-                <input
-                id="regName"
-                placeholder="Your name"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Email
-                </label>
-
-                <input
-                id="regEmail"
-                type="email"
-                placeholder="you@example.com"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Password
-                </label>
-
-                <input
-                id="regPassword"
-                type="password"
-                placeholder="Minimum 6 characters"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Account Type
-                </label>
-
-                <select id="regRole">
-
-                    <option value="jobseeker">
-                    Job Seeker
-                    </option>
-
-                    <option value="employer">
-                    Employer
-                    </option>
-
-                </select>
-
-            </div>
-
-            <div>
-
-                <label>
-                Phone
-                </label>
-
-                <input
-                id="regPhone"
-                placeholder="Phone number"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Location
-                </label>
-
-                <input
-                id="regLocation"
-                placeholder="City, Country"
-                >
-
-            </div>
-
-        </div>
-
-        <div id="registerMessage">
-        </div>
-
-        <button
-        class="primary"
-        onclick="registerUser()">
-        Create Account
-        </button>
-
-        <button
-        class="secondary"
-        onclick="showPage('login')">
-        Back to Login
-        </button>
-
-    </div>
-
-    `;
-
-}
-
-
-async function registerUser(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/register",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        name:
-                            document.getElementById(
-                                "regName"
-                            ).value,
-
-                        email:
-                            document.getElementById(
-                                "regEmail"
-                            ).value,
-
-                        password:
-                            document.getElementById(
-                                "regPassword"
-                            ).value,
-
-                        role:
-                            document.getElementById(
-                                "regRole"
-                            ).value,
-
-                        phone:
-                            document.getElementById(
-                                "regPhone"
-                            ).value,
-
-                        location:
-                            document.getElementById(
-                                "regLocation"
-                            ).value
-
-                    })
-                }
-            );
-
-        token=d.token;
-
-        localStorage.setItem(
-            "jobmart_token",
-            token
-        );
-
-        me=d.user;
-
-        renderTabs();
-
-        showPage("home");
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "registerMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-function forgotPassword(){
-
-    openModal(`
-
-    <h2>
-    Forgot Password
-    </h2>
-
-    <label>
-    Email
-    </label>
-
-    <input
-    id="forgotEmail"
-    type="email"
-    placeholder="you@example.com"
-    >
-
-    <button
-    class="secondary"
-    onclick="sendResetOTP()">
-    Send Reset OTP
-    </button>
-
-    <div id="forgotMessage">
-    </div>
-
-    `);
-
-}
-
-
-async function sendResetOTP(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/forgot-password",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        email:
-                            document.getElementById(
-                                "forgotEmail"
-                            ).value
-
-                    })
-                }
-            );
-
-        document.getElementById(
-            "forgotMessage"
-        ).innerHTML=`
-
-        ${message(
-            "Reset OTP: "
-            +d.demo_otp,
-            "ok"
-        )}
-
-        <label>
-        OTP
-        </label>
-
-        <input id="resetOTP">
-
-        <label>
-        New Password
-        </label>
-
-        <input
-        id="newPassword"
-        type="password"
-        >
-
-        <button
-        class="primary"
-        onclick="resetPassword()">
-        Change Password
-        </button>
-
-        `;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "forgotMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function resetPassword(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/reset-password",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        email:
-                            document.getElementById(
-                                "forgotEmail"
-                            ).value,
-
-                        otp:
-                            document.getElementById(
-                                "resetOTP"
-                            ).value,
-
-                        new_password:
-                            document.getElementById(
-                                "newPassword"
-                            ).value
-
-                    })
-                }
-            );
-
-        alert(d.message);
-
-        closeModal();
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-async function renderProfile(){
-
-    if(!me){
-
-        showPage("login");
-
-        return;
-
-    }
-
-    document.getElementById(
-        "app"
-    ).innerHTML=`
-
-    <div class="card">
-
-        <h1>
-        My Profile
-        </h1>
-
-        <div class="formgrid">
-
-            <div>
-
-                <label>Name</label>
-
-                <input
-                id="profileName"
-                value="${esc(me.name)}"
-                >
-
-            </div>
-
-            <div>
-
-                <label>Phone</label>
-
-                <input
-                id="profilePhone"
-                value="${esc(me.phone)}"
-                >
-
-            </div>
-
-            <div>
-
-                <label>Location</label>
-
-                <input
-                id="profileLocation"
-                value="${esc(me.location)}"
-                >
-
-            </div>
-
-            <div>
-
-                <label>Skills</label>
-
-                <input
-                id="profileSkills"
-                value="${esc(me.skills)}"
-                placeholder="Python, SQL, JavaScript"
-                >
-
-            </div>
-
-            <div>
-
-                <label>Experience</label>
-
-                <input
-                id="profileExperience"
-                value="${esc(me.experience)}"
-                >
-
-            </div>
-
-            <div>
-
-                <label>Education</label>
-
-                <input
-                id="profileEducation"
-                value="${esc(me.education)}"
-                >
-
-            </div>
-
-        </div>
-
-        <label>
-        Bio
-        </label>
-
-        <textarea
-        id="profileBio"
-        >${esc(me.bio)}</textarea>
-
-        <label>
-        Resume / CV
-        </label>
-
-        <textarea
-        id="profileResume"
-        >${esc(me.resume)}</textarea>
-
-        ${
-            me.role==="employer"
-            ?
-            `
-
-            <h2>
-            Company Details
-            </h2>
-
-            <label>
-            Company Name
-            </label>
-
-            <input
-            id="companyName"
-            value="${esc(
-                me.company_name
-            )}"
-            >
-
-            <label>
-            Company Description
-            </label>
-
-            <textarea
-            id="companyDescription"
-            >${esc(
-                me.company_description
-            )}</textarea>
-
-            `
-            :
-            ""
-        }
-
-        <div id="profileMessage">
-        </div>
-
-        <button
-        class="primary"
-        onclick="saveProfile()">
-        Save Profile
-        </button>
-
-    </div>
-
-    `;
-
-}
-
-
-async function saveProfile(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/profile",
-                {
-                    method:"PUT",
-
-                    body:JSON.stringify({
-
-                        name:
-                            document.getElementById(
-                                "profileName"
-                            ).value,
-
-                        phone:
-                            document.getElementById(
-                                "profilePhone"
-                            ).value,
-
-                        location:
-                            document.getElementById(
-                                "profileLocation"
-                            ).value,
-
-                        skills:
-                            document.getElementById(
-                                "profileSkills"
-                            ).value,
-
-                        experience:
-                            document.getElementById(
-                                "profileExperience"
-                            ).value,
-
-                        education:
-                            document.getElementById(
-                                "profileEducation"
-                            ).value,
-
-                        bio:
-                            document.getElementById(
-                                "profileBio"
-                            ).value,
-
-                        resume:
-                            document.getElementById(
-                                "profileResume"
-                            ).value,
-
-                        company_name:
-                            document.getElementById(
-                                "companyName"
-                            )?.value || "",
-
-                        company_description:
-                            document.getElementById(
-                                "companyDescription"
-                            )?.value || ""
-
-                    })
-                }
-            );
-
-        me=d.user;
-
-        document.getElementById(
-            "profileMessage"
-        ).innerHTML =
-            message(
-                d.message,
-                "ok"
-            );
-
-        renderTabs();
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "profileMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-function renderPost(){
-
-    if(
-        !me ||
-        me.role!=="employer"
-    ){
-
-        document.getElementById(
-            "app"
-        ).innerHTML =
-            message(
-                "Employer account required",
-                "error"
-            );
-
-        return;
-
-    }
-
-    document.getElementById(
-        "app"
-    ).innerHTML=`
-
-    <div class="card">
-
-        <h1>
-        Post a Job
-        </h1>
-
-        <div class="formgrid">
-
-            <div>
-
-                <label>
-                Job Title
-                </label>
-
-                <input
-                id="postTitle"
-                placeholder="Software Developer"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Company
-                </label>
-
-                <input
-                id="postCompany"
-                value="${esc(
-                    me.company_name || ""
-                )}"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Country
-                </label>
-
-                <select id="postCountry">
-
-                    ${[
-                        "India",
-                        "United States",
-                        "United Kingdom",
-                        "Canada",
-                        "Australia",
-                        "Germany",
-                        "UAE",
-                        "Singapore",
-                        "Other"
-                    ].map(
-                        x=>`<option>${x}</option>`
-                    ).join("")}
-
-                </select>
-
-            </div>
-
-            <div>
-
-                <label>
-                Location
-                </label>
-
-                <input
-                id="postLocation"
-                placeholder="Hyderabad, Telangana"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Job Type
-                </label>
-
-                <select id="postType">
-
-                    ${[
-                        "Full-time",
-                        "Part-time",
-                        "Contract",
-                        "Internship",
-                        "Freelance"
-                    ].map(
-                        x=>`<option>${x}</option>`
-                    ).join("")}
-
-                </select>
-
-            </div>
-
-            <div>
-
-                <label>
-                Work Mode
-                </label>
-
-                <select id="postMode">
-
-                    ${[
-                        "On-site",
-                        "Hybrid",
-                        "Remote"
-                    ].map(
-                        x=>`<option>${x}</option>`
-                    ).join("")}
-
-                </select>
-
-            </div>
-
-            <div>
-
-                <label>
-                Minimum Salary
-                </label>
-
-                <input
-                id="salaryMin"
-                type="number"
-                value="0"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Maximum Salary
-                </label>
-
-                <input
-                id="salaryMax"
-                type="number"
-                value="0"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Experience
-                </label>
-
-                <input
-                id="postExperience"
-                placeholder="0-2 years"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Education
-                </label>
-
-                <input
-                id="postEducation"
-                placeholder="Degree / Any"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Openings
-                </label>
-
-                <input
-                id="openings"
-                type="number"
-                value="1"
-                min="1"
-                >
-
-            </div>
-
-            <div>
-
-                <label>
-                Skills
-                </label>
-
-                <input
-                id="postSkills"
-                placeholder="Python, SQL, FastAPI"
-                >
-
-            </div>
-
-        </div>
-
-        <label>
-        Job Description
-        </label>
-
-        <textarea
-        id="postDescription"
-        placeholder="Responsibilities, requirements, benefits..."
-        ></textarea>
-
-        <div id="postMessage">
-        </div>
-
-        <button
-        class="primary"
-        onclick="createJob()">
-        Publish Job
-        </button>
-
-    </div>
-
-    `;
-
-}
-
-
-async function createJob(){
-
-    try{
-
-        const d =
-            await api(
-                "/api/jobs",
-                {
-                    method:"POST",
-
-                    body:JSON.stringify({
-
-                        title:
-                            document.getElementById(
-                                "postTitle"
-                            ).value,
-
-                        company:
-                            document.getElementById(
-                                "postCompany"
-                            ).value,
-
-                        description:
-                            document.getElementById(
-                                "postDescription"
-                            ).value,
-
-                        skills:
-                            document.getElementById(
-                                "postSkills"
-                            ).value,
-
-                        country:
-                            document.getElementById(
-                                "postCountry"
-                            ).value,
-
-                        location:
-                            document.getElementById(
-                                "postLocation"
-                            ).value,
-
-                        job_type:
-                            document.getElementById(
-                                "postType"
-                            ).value,
-
-                        work_mode:
-                            document.getElementById(
-                                "postMode"
-                            ).value,
-
-                        salary_min:
-                            Number(
-                                document.getElementById(
-                                    "salaryMin"
-                                ).value || 0
-                            ),
-
-                        salary_max:
-                            Number(
-                                document.getElementById(
-                                    "salaryMax"
-                                ).value || 0
-                            ),
-
-                        experience:
-                            document.getElementById(
-                                "postExperience"
-                            ).value,
-
-                        education:
-                            document.getElementById(
-                                "postEducation"
-                            ).value,
-
-                        openings:
-                            Number(
-                                document.getElementById(
-                                    "openings"
-                                ).value || 1
-                            )
-
-                    })
-                }
-            );
-
-        document.getElementById(
-            "postMessage"
-        ).innerHTML =
-            message(
-                d.message,
-                "ok"
-            );
-
-        setTimeout(
-            ()=>{
-                showPage("dashboard");
-            },
-            700
-        );
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "postMessage"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function renderSaved(){
-
-    if(!me){
-
-        showPage("login");
-
-        return;
-
-    }
-
-    try{
-
-        const d =
-            await api(
-                "/api/saved"
-            );
-
-        document.getElementById(
-            "app"
-        ).innerHTML=`
-
-        <h1>
-        Saved Jobs
-        </h1>
-
-        ${
-            d.jobs.length
-            ?
-            d.jobs.map(
-                jobCard
-            ).join("")
-            :
-            `
-            <div class="card empty">
-            No saved jobs yet.
-            </div>
-            `
-        }
-
-        `;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "app"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function renderApplications(){
-
-    if(!me){
-
-        showPage("login");
-
-        return;
-
-    }
-
-    try{
-
-        const d =
-            await api(
-                "/api/applications"
-            );
-
-        if(!d.applications.length){
-
-            document.getElementById(
-                "app"
-            ).innerHTML=`
-
-            <div class="card empty">
-
-                <h2>
-                No applications yet
-                </h2>
-
-                <p>
-                Apply for a job and
-                track it here.
-                </p>
-
-            </div>
-
-            `;
-
-            return;
-
-        }
-
-        document.getElementById(
-            "app"
-        ).innerHTML=`
-
-        <h1>
-        Applications
-        </h1>
-
-        ${
-            d.applications.map(
-                a=>`
-
-                <div class="card">
-
-                    <h3>
-                    ${esc(a.title)}
-                    </h3>
-
-                    <b>
-                    ${esc(a.company)}
-                    </b>
-
-                    <div class="meta">
-
-                        <span class="badge">
-                        ${esc(
-                            a.location || ""
-                        )}
-                        </span>
-
-                        <span class="badge">
-                        ${esc(
-                            a.job_type || ""
-                        )}
-                        </span>
-
-                        <span class="badge">
-                        ${esc(a.status)}
-                        </span>
-
-                    </div>
-
-                    ${
-                        me.role==="employer"
-
-                        ?
-
-                        `
-                        <p>
-                        <b>
-                        Applicant:
-                        </b>
-
-                        ${esc(
-                            a.applicant_name
-                        )}
-
-                        <br>
-
-                        ${esc(
-                            a.applicant_email
-                        )}
-
-                        <br>
-
-                        ${esc(
-                            a.applicant_phone || ""
-                        )}
-
-                        </p>
-
-                        <p>
-                        ${esc(
-                            a.cover_letter || ""
-                        )}
-                        </p>
-
-                        <select
-                        onchange="
-                        changeStatus(
-                            ${a.id},
-                            this.value
-                        )">
-
-                        ${[
-                            "Applied",
-                            "Under Review",
-                            "Shortlisted",
-                            "Interview",
-                            "Selected",
-                            "Rejected"
-                        ].map(
-                            s=>`
-                            <option
-                            ${
-                                a.status===s
-                                ?"selected"
-                                :""
-                            }>
-                            ${s}
-                            </option>
-                            `
-                        ).join("")}
-
-                        </select>
-
-                        `
-
-                        :
-
-                        `
-
-                        <p>
-                        ${esc(
-                            a.cover_letter || ""
-                        )}
-                        </p>
-
-                        <p class="muted">
-                        Applied:
-                        ${esc(
-                            a.created_at
-                        )}
-                        </p>
-
-                        `
-
-                    }
-
-                </div>
-
-                `
-            ).join("")
-        }
-
-        `;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "app"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function changeStatus(
-    id,
-    status
-){
-
-    try{
-
-        await api(
-            "/api/applications/"+id,
-            {
-                method:"PATCH",
-
-                body:JSON.stringify({
-                    status
-                })
-            }
-        );
-
-        alert(
-            "Status updated"
-        );
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-async function renderDashboard(){
-
-    if(!me){
-
-        showPage("login");
-
-        return;
-
-    }
-
-    try{
-
-        const d =
-            await api(
-                "/api/dashboard"
-            );
-
-        let html=`
-
-        <h1>
-        Dashboard
-        </h1>
-
-        <div class="grid">
-
-        `;
-
-        Object.entries(d)
-        .filter(
-            x=>x[0]!=="role"
-        )
-        .forEach(
-            x=>{
-
-                html += `
-
-                <div class="card">
-
-                    <div class="stat">
-                    ${esc(x[1])}
-                    </div>
-
-                    <h3>
-                    ${esc(
-                        x[0]
-                        .replace(
-                            "_",
-                            " "
-                        )
-                    )}
-                    </h3>
-
-                </div>
-
-                `;
-
-            }
-        );
-
-        html += `
-        </div>
-        `;
-
-        if(me.role==="employer"){
-
-            const jobs =
-                await api(
-                    "/api/my-jobs"
-                );
-
-            html += `
-
-            <div class="card">
-
-                <h2>
-                My Job Posts
-                </h2>
-
-                ${
-                    jobs.jobs.length
-                    ?
-
-                    jobs.jobs.map(
-                        j=>`
-
-                        <div class="card">
-
-                            <h3>
-                            ${esc(
-                                j.title
-                            )}
-                            </h3>
-
-                            <p>
-                            ${esc(
-                                j.location
-                            )}
-                            •
-                            ${esc(
-                                j.job_type
-                            )}
-                            •
-                            ${esc(
-                                j.status
-                            )}
-                            </p>
-
-                            ${
-                                j.status==="active"
-                                ?
-                                `
-                                <button
-                                class="danger"
-                                onclick="
-                                closeJob(
-                                    ${j.id}
-                                )">
-                                Close Job
-                                </button>
-                                `
-                                :
-                                ""
-                            }
-
-                        </div>
-
-                        `
-                    ).join("")
-
-                    :
-
-                    `
-                    <div class="empty">
-                    No jobs posted yet.
-                    </div>
-                    `
-                }
-
-            </div>
-
-            `;
-
-        }
-
-        document.getElementById(
-            "app"
-        ).innerHTML=html;
-
-    }
-    catch(e){
-
-        document.getElementById(
-            "app"
-        ).innerHTML =
-            message(
-                e.message,
-                "error"
-            );
-
-    }
-
-}
-
-
-async function closeJob(id){
-
-    try{
-
-        await api(
-            "/api/jobs/"+id,
-            {
-                method:"DELETE"
-            }
-        );
-
-        renderDashboard();
-
-    }
-    catch(e){
-
-        alert(e.message);
-
-    }
-
-}
-
-
-init();
-
-</script>
-
-</body>
-</html>
-"""
-
-
-# =========================================================
-# HOME
-# =========================================================
-
-@app.get(
-    "/",
-    response_class=HTMLResponse
-)
-def home():
-
-    return HTMLResponse(
-        HTML
+# Local:
+# uvicorn main:app --reload
+#
+# Render:
+# uvicorn main:app --host 0.0.0.0 --port $PORT
+#
+# If you run:
+# python main.py
+# it will also start the server.
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
     )
