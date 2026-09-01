@@ -1,5 +1,4 @@
-job-mart/
-├── main.py
-├── requirements.txt
-└── templates/
-    └── index.html
+fastapi
+uvicorn
+pydantic
+email-validator
