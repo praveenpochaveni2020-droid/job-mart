@@ -1,16 +1,11 @@
-from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException, Query, status
+from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
-import sqlite3, hashlib, secrets, html, re, os, json, urllib.request, urllib.error, urllib.parse, smtplib, base64
+from typing import Optional
+import sqlite3, hashlib, secrets, html, re, os, json, urllib.request, urllib.parse
+import smtplib, base64
 from email.message import EmailMessage
-
-# ============================================================
-# JOB MART — PRODUCTION-READY STANDALONE PLATFORM (v3.5.0)
-# All features included: Web UI, REST API, Live AI, Real OTP,
-# Resume handling, Employer portal, Seeker portal & Admin panel.
-# ============================================================
 
 APP_NAME = "Job Mart"
 DB_FILE = Path(os.getenv("JOBMART_DB", "job_mart.db"))
@@ -20,18 +15,15 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@jobmart.com").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@JobMart2026")
 
-# AI Settings (Compatible with OpenAI GPT-4o / GPT-4o-mini standard endpoints)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# SMTP Credentials for Real Email Delivery
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "no-reply@jobmart.com")
 
-# Twilio Credentials for Real SMS Delivery
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM = os.getenv("TWILIO_FROM", "")
@@ -39,18 +31,112 @@ TWILIO_FROM = os.getenv("TWILIO_FROM", "")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "5"))
 
-app = FastAPI(title=APP_NAME, version="3.5.0", docs_url="/docs", redoc_url="/redoc")
+app = FastAPI(title=APP_NAME, version="4.0.0", docs_url="/docs", redoc_url="/redoc")
 
-# ============================================================
-# DATABASE SETUP & AUTO MIGRATIONS
-# ============================================================
+CATEGORIES = [
+    "IT & Software", "Sales & Marketing", "Finance & Accounting",
+    "Healthcare & Pharma", "Education & Training", "Engineering & Core",
+    "Government & Public Sector", "Construction & Real Estate",
+    "Retail & FMCG", "Logistics & Supply Chain", "Hospitality & Tourism",
+    "Agriculture", "Customer Support", "Creative & Design", "Other"
+]
+
+JOB_TYPES = ["Full Time", "Part Time", "Contract", "Internship", "Remote"]
+
+CSS = r"""
+:root{
+--primary:#1976ed;--primary-dark:#1256b0;--secondary:#f0f4f9;
+--text:#172033;--muted:#657388;--border:#d6dfeb;--card:#fff;
+--bg:#f6f8fb;--danger:#e03137;--success:#178c54;--warn:#f59e0b;
+--shadow:0 8px 30px rgba(23,32,51,.08)
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+background:var(--bg);color:var(--text);line-height:1.5}
+a{text-decoration:none;color:inherit}
+button,input,textarea,select{font:inherit}
+.header{position:sticky;top:0;z-index:100;background:var(--primary);color:#fff;
+box-shadow:0 3px 12px rgba(0,0,0,.12)}
+.navbar{max-width:1200px;margin:auto;padding:12px 18px;display:flex;
+align-items:center;justify-content:space-between;gap:12px}
+.brand{font-size:24px;font-weight:800;letter-spacing:-.5px}
+.nav-menu{display:flex;align-items:center;gap:5px}
+.nav-link{padding:8px 11px;border-radius:7px;font-size:14px;font-weight:600}
+.nav-link:hover{background:rgba(255,255,255,.15)}
+.menu-btn{display:none;border:0;background:transparent;color:#fff;font-size:27px;cursor:pointer}
+.container{max-width:1200px;margin:auto;padding:28px 18px}
+.hero{background:linear-gradient(135deg,#1976ed,#1256b0);color:#fff;padding:46px 24px;
+border-radius:18px;margin-bottom:24px;box-shadow:var(--shadow)}
+.hero h1{font-size:clamp(30px,5vw,48px);line-height:1.1;margin-bottom:10px}
+.hero p{opacity:.94;margin-bottom:22px}
+.search-grid{display:grid;grid-template-columns:2fr 1.2fr 1fr auto;gap:10px}
+input,textarea,select{width:100%;padding:11px 12px;border:1px solid var(--border);
+border-radius:9px;background:#fff;color:var(--text);outline:none}
+input:focus,textarea:focus,select:focus{border-color:var(--primary);
+box-shadow:0 0 0 3px rgba(25,118,237,.12)}
+textarea{min-height:130px;resize:vertical}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+padding:10px 15px;border:0;border-radius:9px;background:var(--primary);color:#fff;
+font-weight:700;cursor:pointer}
+.btn:hover{background:var(--primary-dark)}
+.btn.secondary{background:#e9f1fc;color:var(--primary)}
+.btn.danger{background:var(--danger)}
+.btn.success{background:var(--success)}
+.btn.warn{background:var(--warn)}
+.btn.dark{background:#172033}
+.btn.small{padding:7px 10px;font-size:13px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;
+padding:20px;box-shadow:var(--shadow);margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.two{display:grid;grid-template-columns:1.5fr 1fr;gap:18px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.stat{background:#fff;border:1px solid var(--border);border-radius:13px;padding:18px}
+.stat strong{display:block;font-size:28px;color:var(--primary)}
+.muted{color:var(--muted)}
+.badge{display:inline-block;padding:4px 9px;border-radius:999px;background:#eaf2fd;
+color:var(--primary);font-size:12px;font-weight:700;margin:2px}
+.badge.green{background:#e6f7ef;color:var(--success)}
+.badge.red{background:#fdebed;color:var(--danger)}
+.badge.yellow{background:#fff5df;color:#a96800}
+.job-title{font-size:20px;font-weight:800;margin-bottom:4px}
+.job-meta{color:var(--muted);font-size:14px;margin:4px 0 10px}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.full{grid-column:1/-1}
+label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}
+.alert{padding:12px 14px;border-radius:9px;margin-bottom:15px;background:#eaf2fd;color:#174a85}
+.alert.error{background:#fdebed;color:#9d2026}
+.alert.success{background:#e6f7ef;color:#11663e}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{padding:11px;border-bottom:1px solid var(--border);text-align:left;font-size:14px}
+th{background:#f4f7fb}
+.footer{margin-top:40px;padding:28px 18px;background:#172033;color:#dce4f0}
+.footer-inner{max-width:1200px;margin:auto}
+.empty{text-align:center;padding:35px;color:var(--muted)}
+.avatar{width:48px;height:48px;border-radius:50%;background:#eaf2fd;color:var(--primary);
+display:flex;align-items:center;justify-content:center;font-weight:800}
+.profile-head{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+pre.ai{white-space:pre-wrap;background:#f4f7fb;border:1px solid var(--border);
+padding:14px;border-radius:9px}
+@media(max-width:850px){
+.navbar{position:relative}.menu-btn{display:block}.nav-menu{display:none;width:100%;
+flex-direction:column;align-items:stretch;padding-top:8px}.nav-menu.open{display:flex}
+.nav-link{padding:11px 12px;background:rgba(255,255,255,.08)}
+.search-grid,.two,.form-grid{grid-template-columns:1fr}.grid{grid-template-columns:1fr}
+.stats{grid-template-columns:repeat(2,1fr)}.full{grid-column:auto}
+.hero{padding:32px 18px}.container{padding:20px 13px}
+}
+@media(max-width:480px){.stats{grid-template-columns:1fr}.brand{font-size:21px}
+.actions .btn{width:100%}}
+"""
 
 def db():
-    conn = sqlite3.connect(DB_FILE, timeout=25)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    c = sqlite3.connect(DB_FILE, timeout=30)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -64,1579 +150,634 @@ def clean(v):
 def valid_email(v):
     return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", clean(v)) is not None
 
-def categories():
-    return [
-        "IT & Software", "Sales & Marketing", "Finance & Accounting", 
-        "Healthcare & Pharma", "Education & Training", "Engineering & Core", 
-        "Government & Public Sector", "Construction & Real Estate",
-        "Retail & FMCG", "Logistics & Supply Chain", "Hospitality & Tourism", 
-        "Agriculture", "Customer Support", "Creative & Design", "Other"
-    ]
-
-def init_db():
-    c = db()
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS users(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'jobseeker',
-        phone TEXT DEFAULT '',
-        location TEXT DEFAULT '',
-        bio TEXT DEFAULT '',
-        skills TEXT DEFAULT '',
-        education TEXT DEFAULT '',
-        experience TEXT DEFAULT '',
-        resume_path TEXT DEFAULT '',
-        created_at TEXT NOT NULL,
-        is_blocked INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions(
-        token TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS otps(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL,
-        otp TEXT NOT NULL,
-        purpose TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,
-        used INTEGER DEFAULT 0,
-        attempts INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS companies(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_id INTEGER NOT NULL,
-        name TEXT NOT NULL UNIQUE,
-        description TEXT DEFAULT '',
-        website TEXT DEFAULT '',
-        location TEXT DEFAULT '',
-        logo_path TEXT DEFAULT '',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS jobs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        employer_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        company TEXT DEFAULT '',
-        company_id INTEGER,
-        description TEXT NOT NULL,
-        skills TEXT DEFAULT '',
-        country TEXT DEFAULT 'India',
-        location TEXT DEFAULT '',
-        job_type TEXT DEFAULT 'Full Time',
-        salary TEXT DEFAULT '',
-        experience TEXT DEFAULT '',
-        education TEXT DEFAULT '',
-        category TEXT DEFAULT 'Other',
-        status TEXT DEFAULT 'active',
-        views INTEGER DEFAULT 0,
-        is_flagged INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY(employer_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS applications(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        cover_letter TEXT DEFAULT '',
-        status TEXT DEFAULT 'Applied',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(job_id, user_id),
-        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS saved_jobs(
-        user_id INTEGER NOT NULL,
-        job_id INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY(user_id, job_id),
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        message TEXT NOT NULL,
-        read INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS reports(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        reason TEXT NOT NULL,
-        details TEXT DEFAULT '',
-        status TEXT DEFAULT 'open',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS ai_chats(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        role TEXT NOT NULL,
-        message TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS admin_logs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        admin_email TEXT,
-        action TEXT,
-        details TEXT,
-        created_at TEXT NOT NULL
-    );
-    """)
-
-    # Check & migrate columns safely
-    migrations = {
-        "users": {
-            "phone": "TEXT DEFAULT ''", "bio": "TEXT DEFAULT ''", "skills": "TEXT DEFAULT ''",
-            "education": "TEXT DEFAULT ''", "experience": "TEXT DEFAULT ''",
-            "resume_path": "TEXT DEFAULT ''", "is_blocked": "INTEGER DEFAULT 0"
-        },
-        "sessions": {"expires_at": "TEXT"},
-        "jobs": {
-            "company": "TEXT DEFAULT ''", "company_id": "INTEGER",
-            "category": "TEXT DEFAULT 'Other'", "views": "INTEGER DEFAULT 0",
-            "is_flagged": "INTEGER DEFAULT 0", "updated_at": "TEXT"
-        },
-        "applications": {"updated_at": "TEXT"},
-    }
-
-    for table, cols in migrations.items():
-        existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
-        for col, definition in cols.items():
-            if col not in existing:
-                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
-
-    c.execute("UPDATE jobs SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL OR updated_at = ''")
-    c.execute("UPDATE applications SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL OR updated_at = ''")
-    c.execute("UPDATE sessions SET expires_at = COALESCE(expires_at, ?) WHERE expires_at IS NULL OR expires_at = ''",
-              ((datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),))
-    c.commit()
-    c.close()
-
-def hash_password(password: str) -> str:
+def hash_password(password):
     salt = secrets.token_bytes(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 220000)
-    return salt.hex() + ":" + h.hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 220000)
+    return salt.hex()+":"+digest.hex()
 
-def verify_password(password: str, stored: str) -> bool:
+def verify_password(password, stored):
     try:
-        salt, digest = stored.split(":")
-        h = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 220000)
-        return secrets.compare_digest(h.hex(), digest)
+        salt, digest = stored.split(":",1)
+        check = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 220000)
+        return secrets.compare_digest(check.hex(), digest)
     except Exception:
         return False
 
+def init_db():
+    c=db()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'jobseeker',
+      phone TEXT DEFAULT '',location TEXT DEFAULT '',bio TEXT DEFAULT '',
+      skills TEXT DEFAULT '',education TEXT DEFAULT '',experience TEXT DEFAULT '',
+      resume_path TEXT DEFAULT '',created_at TEXT NOT NULL,is_blocked INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS sessions(
+      token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS companies(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,owner_id INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,
+      description TEXT DEFAULT '',website TEXT DEFAULT '',location TEXT DEFAULT '',
+      logo_path TEXT DEFAULT '',created_at TEXT NOT NULL,
+      FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS jobs(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,employer_id INTEGER NOT NULL,title TEXT NOT NULL,
+      company TEXT DEFAULT '',company_id INTEGER,description TEXT NOT NULL,skills TEXT DEFAULT '',
+      country TEXT DEFAULT 'India',location TEXT DEFAULT '',job_type TEXT DEFAULT 'Full Time',
+      salary TEXT DEFAULT '',experience TEXT DEFAULT '',education TEXT DEFAULT '',
+      category TEXT DEFAULT 'Other',status TEXT DEFAULT 'active',views INTEGER DEFAULT 0,
+      is_flagged INTEGER DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+      FOREIGN KEY(employer_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS applications(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,job_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+      cover_letter TEXT DEFAULT '',status TEXT DEFAULT 'Applied',created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,UNIQUE(job_id,user_id),
+      FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS saved_jobs(
+      user_id INTEGER NOT NULL,job_id INTEGER NOT NULL,created_at TEXT NOT NULL,
+      PRIMARY KEY(user_id,job_id),FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS notifications(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,title TEXT NOT NULL,
+      message TEXT NOT NULL,read INTEGER DEFAULT 0,created_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS reports(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,job_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+      reason TEXT NOT NULL,details TEXT DEFAULT '',status TEXT DEFAULT 'open',created_at TEXT NOT NULL,
+      FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS otps(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL,otp TEXT NOT NULL,purpose TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,used INTEGER DEFAULT 0,attempts INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS ai_chats(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,role TEXT NOT NULL,message TEXT NOT NULL,
+      created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS admin_logs(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,admin_email TEXT,action TEXT,details TEXT,created_at TEXT NOT NULL
+    );
+    """)
+    c.commit(); c.close()
+
 def ensure_admin():
-    c = db()
-    row = c.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()
+    c=db()
+    row=c.execute("SELECT id FROM users WHERE email=?",(ADMIN_EMAIL,)).fetchone()
     if not row:
-        c.execute(
-            "INSERT INTO users(name, email, password_hash, role, created_at) VALUES(?,?,?,?,?)",
-            ("Job Mart Admin", ADMIN_EMAIL, hash_password(ADMIN_PASSWORD), "admin", now_iso())
-        )
-        c.commit()
-    c.close()
+        c.execute("INSERT INTO users(name,email,password_hash,role,created_at) VALUES(?,?,?,?,?)",
+                  ("Job Mart Admin",ADMIN_EMAIL,hash_password(ADMIN_PASSWORD),"admin",now_iso()))
+    else:
+        c.execute("UPDATE users SET role='admin' WHERE email=?",(ADMIN_EMAIL,))
+    c.commit(); c.close()
 
 init_db()
 ensure_admin()
 
-# ============================================================
-# AUTHENTICATION & ACCESS CONTROL
-# ============================================================
+def create_session(user_id):
+    token=secrets.token_urlsafe(48)
+    expiry=(datetime.now(timezone.utc)+timedelta(days=30)).isoformat()
+    c=db(); c.execute("INSERT INTO sessions VALUES(?,?,?,?)",(token,user_id,now_iso(),expiry))
+    c.commit(); c.close(); return token
 
-def create_session(user_id: int) -> str:
-    token = secrets.token_urlsafe(48)
-    expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-    c = db()
-    c.execute("INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)",
-              (token, user_id, now_iso(), expiry))
-    c.commit()
-    c.close()
-    return token
-
-def current_user(request: Request):
-    token = request.cookies.get("jobmart_session")
+def current_user(request):
+    token=request.cookies.get("jobmart_session")
     if not token:
-        # Also allow Bearer token in header for REST API requests
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
-        else:
-            return None
-    c = db()
-    row = c.execute("""
-        SELECT u.* FROM sessions s
-        JOIN users u ON u.id = s.user_id
-        WHERE s.token = ? AND (s.expires_at IS NULL OR s.expires_at > ?)
-    """, (token, now_iso())).fetchone()
+        h=request.headers.get("Authorization","")
+        if h.startswith("Bearer "): token=h[7:].strip()
+    if not token: return None
+    c=db()
+    row=c.execute("""SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id
+                     WHERE s.token=? AND s.expires_at>?""",(token,now_iso())).fetchone()
     c.close()
     return row
 
-def set_login_cookie(response, token: str):
-    response.set_cookie(
-        "jobmart_session", token, httponly=True,
-        samesite="lax", secure=COOKIE_SECURE,
-        max_age=60 * 60 * 24 * 30
-    )
+def require_user(request):
+    u=current_user(request)
+    if not u: raise HTTPException(401,"Authentication required")
+    if u["is_blocked"]: raise HTTPException(403,"Your account is suspended")
+    return u
 
-def logout_user(request: Request):
-    token = request.cookies.get("jobmart_session")
+def require_employer(request):
+    u=require_user(request)
+    if u["role"] not in ("employer","admin"): raise HTTPException(403,"Employer privileges required")
+    return u
+
+def require_admin(request):
+    u=require_user(request)
+    if u["role"]!="admin": raise HTTPException(403,"Admin privileges required")
+    return u
+
+def layout(request,title,body):
+    u=current_user(request)
+    nav = '<a class="nav-link" href="/">Home</a><a class="nav-link" href="/jobs">Find Jobs</a>'
+    if u:
+        nav += '<a class="nav-link" href="/dashboard">Dashboard</a>'
+        nav += '<a class="nav-link" href="/profile">Profile</a>'
+        if u["role"] in ("employer","admin"):
+            nav += '<a class="nav-link" href="/employer">Employer Desk</a>'
+        if u["role"]=="admin":
+            nav += '<a class="nav-link" href="/admin">Admin</a>'
+        nav += '<a class="nav-link" href="/logout">Logout</a>'
+    else:
+        nav += '<a class="nav-link" href="/login">Login</a><a class="nav-link" href="/register">Register</a>'
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)} · {APP_NAME}</title><style>{CSS}</style></head><body>
+<header class="header"><div class="navbar"><a class="brand" href="/">💼 Job Mart</a>
+<button class="menu-btn" onclick="document.getElementById('nav').classList.toggle('open')">☰</button>
+<nav id="nav" class="nav-menu">{nav}</nav></div></header>
+<main class="container">{body}</main>
+<footer class="footer"><div class="footer-inner"><b>Job Mart</b><br><span class="muted">A clean blue corporate job marketplace.</span></div></footer>
+<script>
+document.querySelectorAll('form').forEach(f=>f.addEventListener('submit',()=>{{
+ const b=f.querySelector('button[type=submit]'); if(b){{b.disabled=true;b.style.opacity='.7';}}
+}}));
+</script></body></html>"""
+
+def alert(msg,kind=""):
+    return f'<div class="alert {kind}">{esc(msg)}</div>'
+
+current_user_dummy = False
+
+def render_job_card(j, saved=False, can_save=False):
+    actions=f'<a class="btn" href="/job/{j["id"]}">View Job</a>'
+    if can_save:
+        actions += f'<form method="post" action="/save/{j["id"]}"><button class="btn secondary">♡ {"Unsave" if saved else "Save"}</button></form>'
+    return f"""<article class="card"><div class="job-title">{esc(j["title"])}</div>
+<div class="job-meta">🏢 {esc(j["company"] or "Company")} · 📍 {esc(j["location"] or "India")}</div>
+<span class="badge">{esc(j["job_type"])}</span> <span class="badge">{esc(j["category"])}</span>
+{('<span class="badge green">₹ '+esc(j["salary"])+'</span>') if j["salary"] else ''}
+<p style="margin-top:10px">{esc((j["description"] or "")[:220])}</p>
+<div class="actions">{actions}</div></article>"""
+
+@app.get("/",response_class=HTMLResponse)
+def home(request:Request):
+    c=db(); jobs=c.execute("SELECT * FROM jobs WHERE status='active' AND is_flagged=0 ORDER BY id DESC LIMIT 6").fetchall()
+    c.close()
+    cards="".join(render_job_card(j,False,bool(current_user(request))) for j in jobs)
+    body=f"""<section class="hero"><h1>Find your next opportunity.</h1>
+<p>Search jobs, apply online, track applications and build your professional profile.</p>
+<form method="get" action="/jobs"><div class="search-grid">
+<input name="q" placeholder="Job title, skills or company">
+<input name="location" placeholder="Location">
+<select name="category"><option value="">All categories</option>
+{''.join(f'<option>{esc(x)}</option>' for x in CATEGORIES)}</select>
+<button class="btn dark">Search Jobs</button></div></form></section>
+<h2 style="margin-bottom:14px">Latest Jobs</h2>
+<div class="grid">{"".join(cards) or '<div class="card empty">No jobs posted yet.</div>'}</div>"""
+    return layout(request,"Home",body)
+
+@app.get("/jobs",response_class=HTMLResponse)
+def jobs(request:Request,q:str="",location:str="",category:str="",job_type:str=""):
+    c=db()
+    sql="SELECT * FROM jobs WHERE status='active' AND is_flagged=0"
+    params=[]
+    if q:
+        sql+=" AND (title LIKE ? OR description LIKE ? OR skills LIKE ? OR company LIKE ?)"
+        x=f"%{q}%"; params += [x,x,x,x]
+    if location:
+        sql+=" AND location LIKE ?"; params.append(f"%{location}%")
+    if category:
+        sql+=" AND category=?"; params.append(category)
+    if job_type:
+        sql+=" AND job_type=?"; params.append(job_type)
+    sql+=" ORDER BY id DESC"
+    rows=c.execute(sql,params).fetchall()
+    u=current_user(request)
+    saved=set()
+    if u:
+        saved={r["job_id"] for r in c.execute("SELECT job_id FROM saved_jobs WHERE user_id=?",(u["id"],))}
+    c.close()
+    body=f"""<h1>Find Jobs</h1><div class="card"><form method="get">
+<div class="form-grid"><div><label>Search</label><input name="q" value="{esc(q)}" placeholder="Title, skill, company"></div>
+<div><label>Location</label><input name="location" value="{esc(location)}"></div>
+<div><label>Category</label><select name="category"><option value="">All</option>
+{''.join(f'<option {"selected" if category==x else ""}>{esc(x)}</option>' for x in CATEGORIES)}</select></div>
+<div><label>Job Type</label><select name="job_type"><option value="">All</option>
+{''.join(f'<option {"selected" if job_type==x else ""}>{esc(x)}</option>' for x in JOB_TYPES)}</select></div>
+<div class="full"><button class="btn">Search</button></div></div></form></div>
+<p class="muted" style="margin-bottom:14px">{len(rows)} job(s) found</p>
+<div class="grid">{"".join(render_job_card(j,j["id"] in saved,bool(u)) for j in rows) or '<div class="card empty">No matching jobs found.</div>'}</div>"""
+    return layout(request,"Find Jobs",body)
+
+@app.get("/job/{job_id}",response_class=HTMLResponse)
+def job_detail(request:Request,job_id:int):
+    c=db(); j=c.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone()
+    if not j: c.close(); raise HTTPException(404,"Job not found")
+    c.execute("UPDATE jobs SET views=views+1 WHERE id=?",(job_id,))
+    u=current_user(request)
+    applied=False
+    saved=False
+    if u:
+        applied=bool(c.execute("SELECT 1 FROM applications WHERE job_id=? AND user_id=?",(job_id,u["id"])).fetchone())
+        saved=bool(c.execute("SELECT 1 FROM saved_jobs WHERE job_id=? AND user_id=?",(job_id,u["id"])).fetchone())
+    c.commit(); c.close()
+    apply_block=""
+    if u and u["role"]=="jobseeker":
+        apply_block = alert("You already applied to this job.","success") if applied else f"""
+<div class="card"><h3>Apply for this job</h3><form method="post" action="/apply/{job_id}">
+<label>Cover Letter</label><textarea name="cover_letter" required placeholder="Tell the employer why you are a good fit."></textarea>
+<button class="btn" style="margin-top:10px">Submit Application</button></form></div>"""
+    elif not u:
+        apply_block=alert("Please login as a jobseeker to apply.")
+    body=f"""<div class="two"><section><div class="card"><h1>{esc(j["title"])}</h1>
+<p class="job-meta">🏢 {esc(j["company"] or "Company")} · 📍 {esc(j["location"])} · 🌎 {esc(j["country"])}</p>
+<span class="badge">{esc(j["job_type"])}</span> <span class="badge">{esc(j["category"])}</span>
+<h3 style="margin-top:20px">Job Description</h3><p style="white-space:pre-wrap;margin-top:8px">{esc(j["description"])}</p>
+<h3 style="margin-top:20px">Skills</h3><p>{esc(j["skills"] or "Not specified")}</p>
+<h3 style="margin-top:20px">Requirements</h3><p>Experience: {esc(j["experience"] or "Not specified")}<br>
+Education: {esc(j["education"] or "Not specified")}<br>Salary: {esc(j["salary"] or "Not specified")}</p>
+<div class="actions">{f'<form method="post" action="/save/{job_id}"><button class="btn secondary">♡ {"Unsave" if saved else "Save Job"}</button></form>' if u and u["role"]=="jobseeker" else ''}
+<form method="post" action="/report/{job_id}"><button class="btn danger">Report Job</button></form></div>
+</div>{apply_block}</section>
+<aside><div class="card"><h3>Job Safety</h3><p class="muted">Never pay an employer for an interview, job offer, training, equipment or registration. Report suspicious listings.</p></div></aside></div>"""
+    return layout(request,j["title"],body)
+
+@app.get("/register",response_class=HTMLResponse)
+def register_page(request:Request,msg:str=""):
+    body=f"""<div class="card" style="max-width:620px;margin:auto"><h1>Create Account</h1>
+{alert(msg) if msg else ''}<form method="post" action="/register"><div class="form-grid">
+<div><label>Full Name</label><input name="name" required></div>
+<div><label>Email</label><input name="email" type="email" required></div>
+<div><label>Phone</label><input name="phone" placeholder="+91..."></div>
+<div><label>Role</label><select name="role"><option value="jobseeker">Job Seeker</option><option value="employer">Employer</option></select></div>
+<div class="full"><label>Password</label><input name="password" type="password" minlength="8" required></div>
+<div class="full"><button class="btn">Create Account</button></div></div></form></div>"""
+    return layout(request,"Register",body)
+
+@app.post("/register")
+def register(name:str=Form(...),email:str=Form(...),phone:str=Form(""),role:str=Form("jobseeker"),password:str=Form(...)):
+    name, email = clean(name), clean(email).lower()
+    if not name or not valid_email(email) or len(password)<8 or role not in ("jobseeker","employer"):
+        return RedirectResponse("/register?msg="+urllib.parse.quote("Enter valid details. Password must be at least 8 characters."),303)
+    c=db()
+    try:
+        c.execute("INSERT INTO users(name,email,password_hash,role,phone,created_at) VALUES(?,?,?,?,?,?)",
+                  (name,email,hash_password(password),role,clean(phone),now_iso()))
+        uid=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        c.commit()
+    except sqlite3.IntegrityError:
+        c.close()
+        return RedirectResponse("/register?msg="+urllib.parse.quote("Email already registered."),303)
+    c.close()
+    token=create_session(uid); r=RedirectResponse("/dashboard",303)
+    r.set_cookie("jobmart_session",token,httponly=True,samesite="lax",secure=COOKIE_SECURE,max_age=2592000)
+    return r
+
+@app.get("/login",response_class=HTMLResponse)
+def login_page(request:Request,msg:str=""):
+    body=f"""<div class="card" style="max-width:520px;margin:auto"><h1>Login</h1>{alert(msg) if msg else ''}
+<form method="post" action="/login"><label>Email</label><input name="email" type="email" required style="margin-bottom:12px">
+<label>Password</label><input name="password" type="password" required style="margin-bottom:14px">
+<button class="btn">Login</button></form><p class="muted" style="margin-top:15px">Admin is created from ADMIN_EMAIL and ADMIN_PASSWORD environment variables.</p></div>"""
+    return layout(request,"Login",body)
+
+@app.post("/login")
+def login(email:str=Form(...),password:str=Form(...)):
+    c=db(); u=c.execute("SELECT * FROM users WHERE email=?",(clean(email).lower(),)).fetchone(); c.close()
+    if not u or not verify_password(password,u["password_hash"]):
+        return RedirectResponse("/login?msg="+urllib.parse.quote("Invalid email or password."),303)
+    if u["is_blocked"]: return RedirectResponse("/login?msg="+urllib.parse.quote("Account suspended."),303)
+    token=create_session(u["id"]); r=RedirectResponse("/dashboard",303)
+    r.set_cookie("jobmart_session",token,httponly=True,samesite="lax",secure=COOKIE_SECURE,max_age=2592000)
+    return r
+
+@app.get("/logout")
+def logout(request:Request):
+    token=request.cookies.get("jobmart_session")
     if token:
-        c = db()
-        c.execute("DELETE FROM sessions WHERE token=?", (token,))
+        c=db(); c.execute("DELETE FROM sessions WHERE token=?",(token,)); c.commit(); c.close()
+    r=RedirectResponse("/",303); r.delete_cookie("jobmart_session"); return r
+
+@app.get("/dashboard",response_class=HTMLResponse)
+def dashboard(request:Request):
+    u=require_user(request); c=db()
+    if u["role"]=="jobseeker":
+        apps=c.execute("""SELECT a.*,j.title,j.company FROM applications a JOIN jobs j ON j.id=a.job_id
+                          WHERE a.user_id=? ORDER BY a.id DESC""",(u["id"],)).fetchall()
+        saved=c.execute("""SELECT j.* FROM saved_jobs s JOIN jobs j ON j.id=s.job_id
+                           WHERE s.user_id=? ORDER BY s.created_at DESC""",(u["id"],)).fetchall()
+        unread=c.execute("SELECT COUNT(*) n FROM notifications WHERE user_id=? AND read=0",(u["id"],)).fetchone()["n"]
+        c.close()
+        rows="".join(f'<tr><td><a href="/job/{a["job_id"]}"><b>{esc(a["title"])}</b></a></td><td>{esc(a["company"])}</td><td><span class="badge">{esc(a["status"])}</span></td></tr>' for a in apps)
+        body=f"""<div class="profile-head"><div class="avatar">{esc(u["name"][:1].upper())}</div><div><h1>Welcome, {esc(u["name"])}</h1><span class="muted">Job Seeker</span></div></div>
+<div class="stats"><div class="stat"><strong>{len(apps)}</strong>Applications</div><div class="stat"><strong>{len(saved)}</strong>Saved Jobs</div><div class="stat"><strong>{unread}</strong>Notifications</div><div class="stat"><strong>{len(clean(u["skills"]).split(",")) if u["skills"] else 0}</strong>Skill data</div></div>
+<div class="two" style="margin-top:18px"><div class="card"><h2>My Applications</h2><div class="table-wrap"><table><tr><th>Job</th><th>Company</th><th>Status</th></tr>{rows or '<tr><td colspan="3">No applications yet.</td></tr>'}</table></div></div>
+<div><div class="card"><h3>Quick Actions</h3><div class="actions"><a class="btn" href="/jobs">Find Jobs</a><a class="btn secondary" href="/profile">Edit Profile</a><a class="btn secondary" href="/ai">AI Assistant</a><a class="btn secondary" href="/notifications">Notifications</a></div></div></div></div>"""
+    else:
+        jobs=c.execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC",(u["id"],)).fetchall()
+        apps=c.execute("""SELECT COUNT(*) n FROM applications a JOIN jobs j ON j.id=a.job_id
+                          WHERE j.employer_id=?""",(u["id"],)).fetchone()["n"]
+        c.close()
+        rows="".join(f'<tr><td>{esc(j["title"])}</td><td>{j["views"]}</td><td>{esc(j["status"])}</td><td><a class="btn small" href="/employer/job/{j["id"]}">Manage</a></td></tr>' for j in jobs)
+        body=f"""<h1>Employer Dashboard</h1><div class="stats"><div class="stat"><strong>{len(jobs)}</strong>Jobs</div><div class="stat"><strong>{apps}</strong>Applications</div></div>
+<div class="actions" style="margin:18px 0"><a class="btn" href="/employer/post">+ Post Job</a><a class="btn secondary" href="/employer">Employer Desk</a></div>
+<div class="card"><h2>My Jobs</h2><div class="table-wrap"><table><tr><th>Job</th><th>Views</th><th>Status</th><th></th></tr>{rows or '<tr><td colspan="4">No jobs posted.</td></tr>'}</table></div></div>"""
+    return layout(request,"Dashboard",body)
+
+@app.get("/profile",response_class=HTMLResponse)
+def profile(request:Request,msg:str=""):
+    u=require_user(request)
+    body=f"""<div class="card"><h1>My Profile</h1>{alert(msg,"success") if msg else ''}
+<form method="post" action="/profile" enctype="multipart/form-data"><div class="form-grid">
+<div><label>Name</label><input name="name" value="{esc(u["name"])}" required></div>
+<div><label>Phone</label><input name="phone" value="{esc(u["phone"])}"></div>
+<div><label>Location</label><input name="location" value="{esc(u["location"])}"></div>
+<div><label>Skills</label><input name="skills" value="{esc(u["skills"])}" placeholder="Python, FastAPI, SQL"></div>
+<div><label>Education</label><input name="education" value="{esc(u["education"])}"></div>
+<div><label>Experience</label><input name="experience" value="{esc(u["experience"])}"></div>
+<div class="full"><label>Bio</label><textarea name="bio">{esc(u["bio"])}</textarea></div>
+<div><label>Resume PDF</label><input type="file" name="resume" accept=".pdf,.doc,.docx"></div>
+<div><label>Current Resume</label>{f'<a class="btn secondary" href="/resume">View Resume</a>' if u["resume_path"] else '<span class="muted">None</span>'}</div>
+<div class="full"><button class="btn">Save Profile</button></div></div></form></div>"""
+    return layout(request,"Profile",body)
+
+@app.post("/profile")
+async def profile_save(request:Request,name:str=Form(...),phone:str=Form(""),location:str=Form(""),
+                       skills:str=Form(""),education:str=Form(""),experience:str=Form(""),
+                       bio:str=Form(""),resume:Optional[UploadFile]=File(None)):
+    u=require_user(request)
+    resume_path=u["resume_path"]
+    if resume and resume.filename:
+        ext=Path(resume.filename).suffix.lower()
+        if ext not in (".pdf",".doc",".docx"): return RedirectResponse("/profile?msg="+urllib.parse.quote("Only PDF, DOC or DOCX allowed."),303)
+        data=await resume.read()
+        if len(data)>MAX_UPLOAD_MB*1024*1024: return RedirectResponse("/profile?msg="+urllib.parse.quote("Resume is too large."),303)
+        safe=f"user_{u['id']}_{secrets.token_hex(8)}{ext}"
+        path=UPLOAD_DIR/safe; path.write_bytes(data); resume_path=str(path)
+    c=db(); c.execute("""UPDATE users SET name=?,phone=?,location=?,skills=?,education=?,experience=?,bio=?,resume_path=? WHERE id=?""",
+                      (clean(name),clean(phone),clean(location),clean(skills),clean(education),clean(experience),clean(bio),resume_path,u["id"]))
+    c.commit(); c.close()
+    return RedirectResponse("/profile?msg="+urllib.parse.quote("Profile updated successfully."),303)
+
+@app.get("/resume")
+def resume(request:Request):
+    u=require_user(request)
+    p=Path(u["resume_path"]) if u["resume_path"] else None
+    if not p or not p.exists(): raise HTTPException(404,"Resume not found")
+    return FileResponse(p,filename=p.name)
+
+@app.post("/save/{job_id}")
+def save_job(request:Request,job_id:int):
+    u=require_user(request)
+    if u["role"]!="jobseeker": raise HTTPException(403,"Only jobseekers can save jobs")
+    c=db(); exists=c.execute("SELECT 1 FROM saved_jobs WHERE user_id=? AND job_id=?",(u["id"],job_id)).fetchone()
+    if exists: c.execute("DELETE FROM saved_jobs WHERE user_id=? AND job_id=?",(u["id"],job_id))
+    else: c.execute("INSERT OR IGNORE INTO saved_jobs VALUES(?,?,?)",(u["id"],job_id,now_iso()))
+    c.commit(); c.close(); return RedirectResponse(request.headers.get("referer") or "/jobs",303)
+
+@app.post("/apply/{job_id}")
+def apply(request:Request,job_id:int,cover_letter:str=Form(...)):
+    u=require_user(request)
+    if u["role"]!="jobseeker": raise HTTPException(403,"Only jobseekers can apply")
+    c=db(); j=c.execute("SELECT * FROM jobs WHERE id=? AND status='active'",(job_id,)).fetchone()
+    if not j: c.close(); raise HTTPException(404,"Job unavailable")
+    try:
+        c.execute("INSERT INTO applications(job_id,user_id,cover_letter,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                  (job_id,u["id"],clean(cover_letter),"Applied",now_iso(),now_iso()))
+        c.execute("INSERT INTO notifications(user_id,title,message,created_at) SELECT employer_id,?,?,? FROM jobs WHERE id=?",
+                  ("New application",f"{u['name']} applied for {j['title']}",now_iso(),job_id))
         c.commit()
-        c.close()
+    except sqlite3.IntegrityError:
+        c.rollback()
+    c.close(); return RedirectResponse(f"/job/{job_id}",303)
 
-def require_user(request: Request):
-    u = current_user(request)
-    if not u:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if u["is_blocked"]:
-        raise HTTPException(status_code=403, detail="Your account is suspended")
-    return u
+@app.post("/report/{job_id}")
+def report(request:Request,job_id:int,reason:str=Form("Suspicious listing"),details:str=Form("")):
+    u=require_user(request); c=db()
+    if not c.execute("SELECT 1 FROM jobs WHERE id=?",(job_id,)).fetchone(): c.close(); raise HTTPException(404,"Job not found")
+    c.execute("INSERT INTO reports(job_id,user_id,reason,details,created_at) VALUES(?,?,?,?,?)",
+              (job_id,u["id"],clean(reason),clean(details),now_iso()))
+    c.execute("UPDATE jobs SET is_flagged=1 WHERE id=?",(job_id,))
+    c.commit(); c.close(); return RedirectResponse(f"/job/{job_id}",303)
 
-def require_employer(request: Request):
-    u = require_user(request)
-    if u["role"] not in ("employer", "admin"):
-        raise HTTPException(status_code=403, detail="Employer privileges required")
-    return u
+@app.get("/notifications",response_class=HTMLResponse)
+def notifications(request:Request):
+    u=require_user(request); c=db(); rows=c.execute("SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 100",(u["id"],)).fetchall()
+    c.execute("UPDATE notifications SET read=1 WHERE user_id=?",(u["id"],)); c.commit(); c.close()
+    body="<h1>Notifications</h1>"+("".join(f'<div class="card"><b>{esc(x["title"])}</b><p>{esc(x["message"])}</p><span class="muted">{esc(x["created_at"])}</span></div>' for x in rows) or '<div class="card empty">No notifications.</div>')
+    return layout(request,"Notifications",body)
 
-def require_admin(request: Request):
-    u = require_user(request)
-    if u["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin privileges required")
-    return u
-
-def redirect_login(msg: str = "Please login first."):
-    return RedirectResponse("/login?msg=" + urllib.parse.quote(msg), status_code=303)
-
-# ============================================================
-# NOTIFICATIONS & OTP DISPATCH
-# ============================================================
-
-def notify(user_id: int, title: str, message: str):
-    c = db()
-    c.execute("INSERT INTO notifications(user_id, title, message, created_at) VALUES(?,?,?,?)",
-              (user_id, title, message, now_iso()))
-    c.commit()
+@app.get("/employer",response_class=HTMLResponse)
+def employer(request:Request):
+    u=require_employer(request); c=db()
+    jobs=c.execute("SELECT * FROM jobs WHERE employer_id=? ORDER BY id DESC",(u["id"],)).fetchall()
+    companies=c.execute("SELECT * FROM companies WHERE owner_id=? ORDER BY id DESC",(u["id"],)).fetchall()
     c.close()
+    body=f"""<h1>Employer Desk</h1><div class="actions"><a class="btn" href="/employer/post">+ Post Job</a><a class="btn secondary" href="/employer/company">+ Company</a></div>
+<div class="two" style="margin-top:18px"><div><h2>Jobs</h2>{''.join(f'<div class="card"><h3>{esc(j["title"])}</h3><p class="muted">{esc(j["location"])} · {esc(j["status"])} · {j["views"]} views</p><div class="actions"><a class="btn small" href="/employer/job/{j["id"]}">Manage</a></div></div>' for j in jobs) or '<div class="card empty">No jobs.</div>'}</div>
+<div><h2>Companies</h2>{''.join(f'<div class="card"><b>{esc(x["name"])}</b><p>{esc(x["location"])}</p></div>' for x in companies) or '<div class="card empty">No company.</div>'}</div></div>"""
+    return layout(request,"Employer Desk",body)
 
-def notify_job_owner(job_id: int, title: str, message: str):
-    c = db()
-    row = c.execute("SELECT employer_id FROM jobs WHERE id=?", (job_id,)).fetchone()
-    c.close()
-    if row:
-        notify(row["employer_id"], title, message)
+@app.get("/employer/company",response_class=HTMLResponse)
+def company_page(request:Request):
+    require_employer(request)
+    body="""<div class="card"><h1>Create Company</h1><form method="post"><div class="form-grid">
+<div><label>Company Name</label><input name="name" required></div><div><label>Website</label><input name="website" placeholder="https://example.com"></div>
+<div><label>Location</label><input name="location"></div><div class="full"><label>Description</label><textarea name="description"></textarea></div>
+<div class="full"><button class="btn">Create Company</button></div></div></form></div>"""
+    return layout(request,"Company",body)
 
-def create_otp(email: str, purpose: str) -> str:
-    otp = str(secrets.randbelow(900000) + 100000)
-    expires = int(datetime.now(timezone.utc).timestamp()) + 600
-    c = db()
-    c.execute("UPDATE otps SET used=1 WHERE email=? AND purpose=? AND used=0", (email, purpose))
-    c.execute("INSERT INTO otps(email, otp, purpose, expires_at) VALUES(?,?,?,?)",
-              (email, otp, purpose, expires))
-    c.commit()
-    c.close()
-    return otp
-
-def verify_otp(email: str, otp: str, purpose: str) -> bool:
-    now = int(datetime.now(timezone.utc).timestamp())
-    c = db()
-    row = c.execute("""
-        SELECT * FROM otps
-        WHERE email=? AND purpose=? AND used=0 AND expires_at>? 
-        ORDER BY id DESC LIMIT 1
-    """, (email, purpose, now)).fetchone()
-    if not row or row["attempts"] >= 5:
-        c.close()
-        return False
-    if not secrets.compare_digest(str(row["otp"]), clean(otp)):
-        c.execute("UPDATE otps SET attempts = attempts + 1 WHERE id=?", (row["id"],))
+@app.post("/employer/company")
+def company_create(request:Request,name:str=Form(...),website:str=Form(""),location:str=Form(""),description:str=Form("")):
+    u=require_employer(request); c=db()
+    try:
+        c.execute("INSERT INTO companies(owner_id,name,website,location,description,created_at) VALUES(?,?,?,?,?,?)",
+                  (u["id"],clean(name),clean(website),clean(location),clean(description),now_iso()))
         c.commit()
-        c.close()
-        return False
-    c.execute("UPDATE otps SET used=1 WHERE id=?", (row["id"],))
-    c.commit()
-    c.close()
-    return True
+    except sqlite3.IntegrityError:
+        c.rollback()
+    c.close(); return RedirectResponse("/employer",303)
 
-def send_email(to_email: str, subject: str, body: str):
-    if not SMTP_HOST:
-        return False, "SMTP server not configured"
+@app.get("/employer/post",response_class=HTMLResponse)
+def post_job_page(request:Request):
+    u=require_employer(request); c=db(); companies=c.execute("SELECT * FROM companies WHERE owner_id=?",(u["id"],)).fetchall(); c.close()
+    body=f"""<div class="card"><h1>Post a Job</h1><form method="post"><div class="form-grid">
+<div><label>Job Title</label><input name="title" required></div><div><label>Company</label><input name="company" required></div>
+<div><label>Location</label><input name="location" placeholder="Hyderabad"></div><div><label>Country</label><input name="country" value="India"></div>
+<div><label>Job Type</label><select name="job_type">{''.join(f'<option>{x}</option>' for x in JOB_TYPES)}</select></div>
+<div><label>Category</label><select name="category">{''.join(f'<option>{esc(x)}</option>' for x in CATEGORIES)}</select></div>
+<div><label>Salary</label><input name="salary" placeholder="₹5–8 LPA"></div><div><label>Experience</label><input name="experience"></div>
+<div><label>Education</label><input name="education"></div><div><label>Skills</label><input name="skills" placeholder="Python, SQL, Excel"></div>
+<div class="full"><label>Description</label><textarea name="description" required></textarea></div>
+<div class="full"><button class="btn">Publish Job</button></div></div></form></div>"""
+    return layout(request,"Post Job",body)
+
+@app.post("/employer/post")
+def post_job(request:Request,title:str=Form(...),company:str=Form(...),location:str=Form(""),country:str=Form("India"),
+             job_type:str=Form("Full Time"),category:str=Form("Other"),salary:str=Form(""),experience:str=Form(""),
+             education:str=Form(""),skills:str=Form(""),description:str=Form(...)):
+    u=require_employer(request)
+    if job_type not in JOB_TYPES: job_type="Full Time"
+    if category not in CATEGORIES: category="Other"
+    c=db(); t=now_iso()
+    c.execute("""INSERT INTO jobs(employer_id,title,company,description,skills,country,location,job_type,salary,
+              experience,education,category,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (u["id"],clean(title),clean(company),clean(description),clean(skills),clean(country),clean(location),
+               job_type,clean(salary),clean(experience),clean(education),category,"active",t,t))
+    c.commit(); c.close(); return RedirectResponse("/employer",303)
+
+@app.get("/employer/job/{job_id}",response_class=HTMLResponse)
+def manage_job(request:Request,job_id:int):
+    u=require_employer(request); c=db()
+    j=c.execute("SELECT * FROM jobs WHERE id=? AND employer_id=?",(job_id,u["id"])).fetchone()
+    if not j: c.close(); raise HTTPException(404,"Job not found")
+    apps=c.execute("""SELECT a.*,u.name,u.email,u.phone,u.resume_path FROM applications a JOIN users u ON u.id=a.user_id
+                      WHERE a.job_id=? ORDER BY a.id DESC""",(job_id,)).fetchall(); c.close()
+    rows="".join(f"""<tr><td>{esc(a["name"])}<br><span class="muted">{esc(a["email"])}</span></td>
+<td>{esc(a["status"])}</td><td>{esc(a["cover_letter"])}</td><td>
+<form method="post" action="/employer/application/{a["id"]}"><select name="status">
+{''.join(f'<option {"selected" if a["status"]==s else ""}>{s}</option>' for s in ["Applied","Shortlisted","Interview","Selected","Rejected"])}</select>
+<button class="btn small">Update</button></form></td></tr>""" for a in apps)
+    body=f"""<div class="card"><h1>{esc(j["title"])}</h1><p>{esc(j["description"])}</p><div class="actions">
+<form method="post" action="/employer/job/{job_id}/toggle"><button class="btn warn">{"Close" if j["status"]=="active" else "Reopen"} Job</button></form>
+<form method="post" action="/employer/job/{job_id}/delete"><button class="btn danger">Delete Job</button></form></div></div>
+<div class="card"><h2>Applicants ({len(apps)})</h2><div class="table-wrap"><table><tr><th>Candidate</th><th>Status</th><th>Cover Letter</th><th>Update</th></tr>{rows or '<tr><td colspan="4">No applicants.</td></tr>'}</table></div></div>"""
+    return layout(request,"Manage Job",body)
+
+@app.post("/employer/application/{app_id}")
+def update_application(request:Request,app_id:int,status:str=Form(...)):
+    u=require_employer(request)
+    allowed={"Applied","Shortlisted","Interview","Selected","Rejected"}
+    if status not in allowed: raise HTTPException(400,"Invalid status")
+    c=db(); row=c.execute("""SELECT a.user_id,a.job_id FROM applications a JOIN jobs j ON j.id=a.job_id
+                             WHERE a.id=? AND j.employer_id=?""",(app_id,u["id"])).fetchone()
+    if not row: c.close(); raise HTTPException(404,"Application not found")
+    c.execute("UPDATE applications SET status=?,updated_at=? WHERE id=?",(status,now_iso(),app_id))
+    c.execute("INSERT INTO notifications(user_id,title,message,created_at) VALUES(?,?,?,?)",
+              (row["user_id"],"Application updated",f"Your application status is now {status}.",now_iso()))
+    c.commit(); c.close(); return RedirectResponse(f"/employer/job/{row['job_id']}",303)
+
+@app.post("/employer/job/{job_id}/toggle")
+def toggle_job(request:Request,job_id:int):
+    u=require_employer(request); c=db()
+    c.execute("UPDATE jobs SET status=CASE WHEN status='active' THEN 'closed' ELSE 'active' END,updated_at=? WHERE id=? AND employer_id=?",(now_iso(),job_id,u["id"]))
+    c.commit(); c.close(); return RedirectResponse(f"/employer/job/{job_id}",303)
+
+@app.post("/employer/job/{job_id}/delete")
+def delete_job(request:Request,job_id:int):
+    u=require_employer(request); c=db(); c.execute("DELETE FROM jobs WHERE id=? AND employer_id=?",(job_id,u["id"])); c.commit(); c.close()
+    return RedirectResponse("/employer",303)
+
+def openai_call(messages):
+    if not OPENAI_API_KEY: return None
+    payload={"model":OPENAI_MODEL,"messages":messages,"temperature":0.3}
+    req=urllib.request.Request("https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode(),headers={"Content-Type":"application/json","Authorization":"Bearer "+OPENAI_API_KEY},method="POST")
     try:
-        msg = EmailMessage()
-        msg["From"] = SMTP_FROM
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.set_content(body)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-            s.starttls()
-            if SMTP_USER and SMTP_PASSWORD:
-                s.login(SMTP_USER, SMTP_PASSWORD)
-            s.send_message(msg)
-        return True, "sent"
-    except Exception as e:
-        return False, str(e)
-
-def send_sms(phone: str, message: str):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM and phone):
-        return False, "SMS gateway credentials not set"
-    try:
-        data = urllib.parse.urlencode({"To": phone, "From": TWILIO_FROM, "Body": message}).encode()
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
-        req = urllib.request.Request(url, data=data, method="POST")
-        auth = base64.b64encode(f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode()).decode()
-        req.add_header("Authorization", "Basic " + auth)
-        urllib.request.urlopen(req, timeout=20).read()
-        return True, "sent"
-    except Exception as e:
-        return False, str(e)
-
-def deliver_otp(email: str, phone: str, otp: str, purpose: str):
-    subject = f"{APP_NAME} Verification Code"
-    text = f"Your {APP_NAME} verification code for {purpose} is {otp}. Valid for 10 minutes."
-    email_ok, email_msg = send_email(email, subject, text)
-    sms_ok, sms_msg = (False, "")
-    if phone:
-        sms_ok, sms_msg = send_sms(phone, text)
-    # If no gateway configured, inform frontend to display demo OTP
-    demo_mode = (not email_ok) and (not sms_ok)
-    return demo_mode, email_ok, sms_ok
-
-# ============================================================
-# AI ENGINE (OPENAI / GEMINI COMPATIBLE WITH FALLBACKS)
-# ============================================================
-
-def openai_call(messages: list, temperature: float = 0.3) -> Optional[str]:
-    if not OPENAI_API_KEY:
-        return None
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": messages,
-        "temperature": temperature
-    }
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
-        },
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            res = json.loads(r.read().decode())
-            return res["choices"][0]["message"]["content"].strip()
+        with urllib.request.urlopen(req,timeout=30) as r:
+            return json.loads(r.read().decode())["choices"][0]["message"]["content"].strip()
     except Exception:
         return None
 
-def ai_support_chat(user_msg: str, role: str = "guest") -> str:
-    system_prompt = (
-        "You are Job Mart AI Assistant. Help users navigate jobs, draft cover letters, "
-        "detect fraud, build profiles and troubleshoot. Be concise, polite, and actionable. "
-        "Warn users never to transfer money for interviews or share credentials."
-    )
-    res = openai_call([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"User role: {role}\nQuery: {user_msg}"}
-    ])
-    if res:
-        return res
-    m = user_msg.lower()
-    if any(k in m for k in ("resume", "cv")):
-        return "You can upload or generate your resume inside Profile -> Resume Builder. Keep achievements measurable."
-    if any(k in m for k in ("scam", "fraud", "money", "fake")):
-        return "Safety Warning: Legitimate employers on Job Mart never demand fees for interviews, training, or kit. Report flagged jobs instantly."
-    if any(k in m for k in ("apply", "application")):
-        return "Click on any job listing and submit your cover letter. Check real-time progress under Seeker Dashboard."
-    if any(k in m for k in ("post", "hire", "employer")):
-        return "Employers can post and manage listings via the 'Post Job' and 'Employer Desk' menus."
-    return "Hello! I am Job Mart AI Support. Ask me about job listings, resume tips, interview prep, or safety verification."
+def ai_fallback(msg):
+    m=msg.lower()
+    if "resume" in m or "cv" in m: return "Improve your resume with measurable achievements, relevant skills and keywords from the target job."
+    if any(x in m for x in ("scam","fraud","money","fee")): return "Safety warning: never pay money for an interview or job offer. Report suspicious listings."
+    if "interview" in m: return "Prepare a 60-second introduction, review the job description, and prepare 3 STAR examples."
+    return "I’m Job Mart AI Assistant. Ask me about jobs, resumes, applications, interviews or safety."
 
-def ai_resume_advisor(skills: str, bio: str, target_job: str = "") -> str:
-    prompt = f"Analyze skills: '{skills}' and bio: '{bio}' for target role '{target_job}'. Provide 3 bullet improvements and 3 recommended keywords."
-    res = openai_call([
-        {"role": "system", "content": "You are a senior hiring recruiter. Provide high-impact resume bullet points."},
-        {"role": "user", "content": prompt}
-    ])
-    if res:
-        return res
-    return (
-        "1. Highlight quantifiable achievements (e.g. 'Boosted performance by 25%').\n"
-        "2. Align technical keywords directly with posted vacancy requirements.\n"
-        "3. Include direct links to projects, certifications, and code repositories."
-    )
+@app.get("/ai",response_class=HTMLResponse)
+def ai_page(request:Request):
+    u=current_user(request)
+    body="""<div class="card" style="max-width:800px;margin:auto"><h1>🤖 Job Mart AI Assistant</h1>
+<p class="muted" style="margin:8px 0 16px">Ask about resumes, interviews, job applications or safety.</p>
+<form method="post"><textarea name="message" required placeholder="How can I improve my resume?"></textarea>
+<button class="btn" style="margin-top:10px">Ask AI</button></form></div>"""
+    return layout(request,"AI Assistant",body)
 
-# ============================================================
-# UI DESIGN SYSTEM & RESPONSIVE HTML GENERATOR
-# ============================================================
+@app.post("/ai",response_class=HTMLResponse)
+def ai_ask(request:Request,message:str=Form(...)):
+    u=current_user(request); role=u["role"] if u else "guest"
+    answer=openai_call([{"role":"system","content":"You are Job Mart AI Assistant. Be concise, practical and safety-focused."},
+                        {"role":"user","content":f"Role: {role}\nQuestion: {clean(message)}"}]) or ai_fallback(message)
+    if u:
+        c=db(); c.execute("INSERT INTO ai_chats(user_id,role,message,created_at) VALUES(?,?,?,?)",(u["id"],"user",clean(message),now_iso()))
+        c.execute("INSERT INTO ai_chats(user_id,role,message,created_at) VALUES(?,?,?,?)",(u["id"],"assistant",answer,now_iso()))
+        c.commit(); c.close()
+    body=f"""<div class="card"><h1>🤖 AI Assistant</h1><div class="card"><b>You:</b><p>{esc(message)}</p></div>
+<div class="card"><b>Job Mart AI:</b><pre class="ai">{esc(answer)}</pre></div>
+<form method="post"><textarea name="message" required placeholder="Ask another question..."></textarea><button class="btn" style="margin-top:10px">Ask</button></form></div>"""
+    return layout(request,"AI Assistant",body)
 
-CSS = r"""
-:root{--primary:#1976ed;--primary-dark:#1256b0;--secondary:#f0f4f9;--text:#172033;--muted:#657388;--border:#d6dfeb;--card:#ffffff;--bg:#f6f8fb;--danger:#e03137;--success:#178c54;--warn:#f59e0b}
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
-a{text-decoration:none;color:inherit}
-.header{position:sticky;top:0;z-index:100;background:var(--primary);color:#fff;box-shadow:0 3px 12px rgba(0,0,0,0.1)}
-.navbar{max-width:1200px;margin:auto;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
-.brand{font-size:24px;font-weight:800;letter-spacing:-0.5px}
-.nav-menu{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.nav-link{padding:8px 12px;border-radius:6px;font-size:14px;font-weight:600;color:#fff;display:inline-block;transition:0.2s}
-.nav-link:hover{background:rgba(255,255,255,0.2)}
-.container{max-width:1200px;margin:28px auto;padding:0 18px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;box-shadow:0 2px 6px rgba(0,0,0,0.04);margin-bottom:22px}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}.three{grid-template-columns:repeat(3,1fr)}.four{grid-template-columns:repeat(4,1fr)}
-input,select,textarea{width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:#fff;margin-top:6px;outline:none}
-input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(25,118,237,0.15)}
-textarea{min-height:110px;resize:vertical}
-label{font-weight:700;font-size:13px;color:#334155;display:block;margin-top:12px}
-.btn{display:inline-block;border:0;background:var(--primary);color:#fff;border-radius:8px;padding:10px 18px;font-weight:700;font-size:14px;cursor:pointer;text-align:center;transition:0.2s}
-.btn:hover{background:var(--primary-dark)}
-.btn.secondary{background:var(--secondary);color:var(--primary)}
-.btn.success{background:var(--success)}
-.btn.danger{background:var(--danger)}
-.btn.warn{background:var(--warn);color:#000}
-.btn.sm{padding:6px 12px;font-size:12px;border-radius:6px}
-.badge{display:inline-block;padding:3px 9px;border-radius:14px;background:#e9f2ff;color:var(--primary);font-size:12px;font-weight:600}
-.badge.green{background:#e8f7ee;color:var(--success)}
-.badge.red{background:#feecee;color:var(--danger)}
-.badge.orange{background:#fef5e7;color:#b45309}
-.job-item{background:#fff;border:1px solid var(--border);border-radius:12px;padding:20px;display:flex;flex-direction:column;justify-content:space-between;border-left:4px solid var(--primary);transition:transform 0.15s}
-.job-item:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.06)}
-.job-title{font-size:19px;font-weight:700;color:var(--primary);margin-bottom:6px}
-.job-company{font-weight:700;color:#2c3e50;font-size:14px;margin-bottom:4px}
-.job-meta{font-size:13px;color:var(--muted);margin-bottom:12px}
-.alert{padding:12px 16px;border-radius:8px;background:#fdf2f2;color:var(--danger);border:1px solid #f9d6d7;margin-bottom:18px;font-size:14px}
-.alert.ok{background:#edf9f2;color:var(--success);border-color:#c7eed5}
-.stats-box{background:var(--secondary);border-radius:10px;padding:18px;text-align:center}
-.stats-box b{display:block;font-size:26px;color:var(--primary);margin-top:4px}
-table{width:100%;border-collapse:collapse;margin-top:14px}
-th,td{padding:12px;border-bottom:1px solid var(--border);text-align:left;font-size:14px}
-th{background:#f8fafc;font-weight:700}
-@media(max-width:850px){.grid,.three,.four{grid-template-columns:1fr}.navbar{flex-direction:column;align-items:flex-start}}
-"""
-
-def render_page(title: str, content: str, user=None, msg: str = "", ok: str = ""):
-    nav = '<a class="nav-link" href="/">Explore Jobs</a>'
-    if user:
-        if user["role"] in ("employer", "admin"):
-            nav += '<a class="nav-link" href="/jobs/post">Post Job</a>'
-            nav += '<a class="nav-link" href="/employer/dashboard">Employer Desk</a>'
-        if user["role"] in ("jobseeker", "admin"):
-            nav += '<a class="navlink" href="/seeker/dashboard">My Applications</a>'
-            nav += '<a class="nav-link" href="/saved">Bookmarks</a>'
-        if user["role"] == "admin":
-            nav += '<a class="nav-link" href="/admin">Admin Panel</a>'
-        nav += '<a class="nav-link" href="/profile">Profile</a>'
-        nav += '<a class="nav-link" href="/notifications">Alerts</a>'
-        nav += '<a class="nav-link" href="/ai-assistant">AI Support</a>'
-        nav += '<a class="nav-link" href="/logout">Logout</a>'
-    else:
-        nav += '<a class="nav-link" href="/login">Login</a>'
-        nav += '<a class="nav-link" href="/register">Register</a>'
-        nav += '<a class="nav-link" href="/ai-assistant">AI Help</a>'
-
-    alert_html = ""
-    if msg:
-        alert_html += f'<div class="alert">{esc(msg)}</div>'
-    if ok:
-        alert_html += f'<div class="alert ok">{esc(ok)}</div>'
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{esc(title)} — {APP_NAME}</title>
-<style>{CSS}</style>
-</head>
-<body>
-<header class="header">
-  <div class="navbar">
-    <a href="/" class="brand">🚀 {APP_NAME}</a>
-    <nav class="nav-menu">{nav}</nav>
-  </div>
-</header>
-<main class="container">
-  {alert_html}
-  {content}
-</main>
-</body>
-</html>"""
-
-# ============================================================
-# PUBLIC JOB SEARCH & DISCOVERY
-# ============================================================
-
-@app.get("/", response_class=HTMLResponse)
-def home_jobs(
-    request: Request,
-    q: str = "",
-    category: str = "",
-    job_type: str = "",
-    country: str = "India",
-    msg: str = "",
-    ok: str = ""
-):
-    user = current_user(request)
-    c = db()
-    query = "SELECT * FROM jobs WHERE status='active' AND is_flagged=0"
-    params = []
-
-    if q:
-        query += " AND (title LIKE ? OR description LIKE ? OR skills LIKE ? OR company LIKE ?)"
-        params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
-    if category and category != "All":
-        query += " AND category=?"
-        params.append(category)
-    if job_type and job_type != "All":
-        query += " AND job_type=?"
-        params.append(job_type)
-    if country and country != "All":
-        query += " AND country=?"
-        params.append(country)
-
-    query += " ORDER BY id DESC LIMIT 40"
-    job_rows = c.execute(query, params).fetchall()
+@app.get("/admin",response_class=HTMLResponse)
+def admin(request:Request):
+    u=require_admin(request); c=db()
+    users=c.execute("SELECT id,name,email,role,is_blocked,created_at FROM users ORDER BY id DESC").fetchall()
+    jobs=c.execute("SELECT j.*,u.name employer FROM jobs j JOIN users u ON u.id=j.employer_id ORDER BY j.id DESC").fetchall()
+    reports=c.execute("""SELECT r.*,j.title,u.name FROM reports r JOIN jobs j ON j.id=r.job_id JOIN users u ON u.id=r.user_id ORDER BY r.id DESC""").fetchall()
+    stats=(c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"],
+           c.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"],
+           c.execute("SELECT COUNT(*) n FROM applications").fetchone()["n"],
+           c.execute("SELECT COUNT(*) n FROM reports WHERE status='open'").fetchone()["n"])
     c.close()
-
-    cat_opts = '<option value="All">All Categories</option>'
-    for cat in categories():
-        sel = "selected" if cat == category else ""
-        cat_opts += f'<option value="{esc(cat)}" {sel}>{esc(cat)}</option>'
-
-    type_opts = '<option value="All">All Types</option>'
-    for jt in ["Full Time", "Part Time", "Contract", "Remote", "Internship"]:
-        sel = "selected" if jt == job_type else ""
-        type_opts += f'<option value="{jt}" {sel}>{jt}</option>'
-
-    cards = ""
-    for r in job_rows:
-        cards += f"""
-        <div class="job-item">
-          <div>
-            <a href="/jobs/{r['id']}" class="job-title">{esc(r['title'])}</a>
-            <div class="job-company">{esc(r['company'] or 'Verified Enterprise')}</div>
-            <div class="job-meta">📍 {esc(r['location'])}, {esc(r['country'])} • 💼 {esc(r['job_type'])}</div>
-            <p style="font-size:13px; color:#475569; margin-bottom:12px;">{esc(r['description'][:140])}...</p>
-            <div>
-              <span class="badge">{esc(r['category'])}</span>
-              <span class="badge green">{esc(r['salary'] or 'Best in Industry')}</span>
-            </div>
-          </div>
-          <div style="margin-top:16px; display:flex; gap:8px;">
-            <a href="/jobs/{r['id']}" class="btn sm">View Role</a>
-            <form action="/jobs/{r['id']}/save" method="post" style="display:inline;">
-              <button class="btn secondary sm" type="submit">Bookmark</button>
-            </form>
-          </div>
-        </div>
-        """
-
-    if not cards:
-        cards = '<div class="card empty" style="grid-column:1/-1; text-align:center; color:#64748b;">No matching roles found. Try resetting filters.</div>'
-
-    filter_box = f"""
-    <div class="card">
-      <h2 style="margin-bottom:12px; font-size:22px;">Discover Opportunities</h2>
-      <form method="get" action="/" class="grid four">
-        <input type="text" name="q" value="{esc(q)}" placeholder="Job title, keywords, company...">
-        <select name="category">{cat_opts}</select>
-        <select name="job_type">{type_opts}</select>
-        <button class="btn" type="submit">Search Jobs</button>
-      </form>
-    </div>
-    <div class="grid" style="grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));">
-      {cards}
-    </div>
-    """
-    return HTMLResponse(render_page("Job Explorer", filter_box, user, msg=msg, ok=ok))
-
-@app.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_details(job_id: int, request: Request, msg: str = "", ok: str = ""):
-    user = current_user(request)
-    c = db()
-    c.execute("UPDATE jobs SET views = views + 1 WHERE id=?", (job_id,))
-    c.commit()
-    job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    
-    already_applied = False
-    if user:
-        app_check = c.execute("SELECT id FROM applications WHERE job_id=? AND user_id=?", (job_id, user["id"])).fetchone()
-        already_applied = bool(app_check)
-    c.close()
-
-    if not job:
-        raise HTTPException(status_code=404, detail="Job listing not found")
-
-    action_section = ""
-    if not user:
-        action_section = '<p><a href="/login" class="btn">Login to Apply</a></p>'
-    elif user["role"] == "jobseeker":
-        if already_applied:
-            action_section = '<div class="alert ok">You have applied for this position. Track progress under Dashboard.</div>'
-        else:
-            action_section = f"""
-            <form method="post" action="/jobs/{job_id}/apply">
-              <label>Cover Letter / Qualifications</label>
-              <textarea name="cover_letter" placeholder="Explain why you are an ideal fit for this role..."></textarea>
-              <button class="btn success" style="margin-top:12px;" type="submit">Confirm Application</button>
-            </form>
-            """
-
-    content = f"""
-    <div class="card" style="max-width:800px; margin:auto;">
-      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-        <div>
-          <h1 style="font-size:26px; color:#1e293b;">{esc(job['title'])}</h1>
-          <div style="font-size:16px; font-weight:700; color:#3b82f6; margin-top:4px;">{esc(job['company'])}</div>
-          <div style="color:#64748b; font-size:14px; margin:6px 0;">📍 {esc(job['location'])}, {esc(job['country'])} • {esc(job['job_type'])}</div>
-        </div>
-        <div style="text-align:right;">
-          <span class="badge green" style="font-size:14px; padding:6px 12px;">{esc(job['salary'] or 'Negotiable')}</span>
-          <div style="font-size:12px; color:#94a3b8; margin-top:6px;">Views: {job['views']}</div>
-        </div>
-      </div>
-      <hr style="margin:20px 0; border:0; border-top:1px solid #e2e8f0;">
-      <h3 style="font-size:17px; margin-bottom:8px;">Job Description</h3>
-      <p style="white-space:pre-wrap; line-height:1.7; color:#334155;">{esc(job['description'])}</p>
-      
-      <h3 style="font-size:17px; margin:18px 0 8px;">Key Requirements & Skills</h3>
-      <p style="color:#334155;">{esc(job['skills'] or 'Open for relevant qualifications')}</p>
-      
-      <hr style="margin:20px 0; border:0; border-top:1px solid #e2e8f0;">
-      {action_section}
-      
-      <div style="margin-top:24px; padding-top:14px; border-top:1px dashed #cbd5e1; display:flex; justify-content:space-between;">
-        <form action="/jobs/{job_id}/report" method="post" style="display:inline;">
-          <input type="hidden" name="reason" value="Potential Spam or Irregular Request">
-          <button class="btn danger sm" type="submit">Report Suspicious Job</button>
-        </form>
-        <form action="/jobs/{job_id}/save" method="post" style="display:inline;">
-          <button class="btn secondary sm" type="submit">Bookmark Role</button>
-        </form>
-      </div>
-    </div>
-    """
-    return HTMLResponse(render_page(job["title"], content, user, msg=msg, ok=ok))
-
-@app.post("/jobs/{job_id}/apply")
-def apply_to_job(job_id: int, request: Request, cover_letter: str = Form("")):
-    user = current_user(request)
-    if not user:
-        return redirect_login("Please login before applying.")
-    if user["role"] != "jobseeker":
-        return RedirectResponse(f"/jobs/{job_id}?msg=Employer+accounts+cannot+apply+for+jobs.", status_code=303)
-
-    c = db()
-    try:
-        c.execute("""
-            INSERT INTO applications(job_id, user_id, cover_letter, created_at, updated_at)
-            VALUES(?,?,?,?,?)
-        """, (job_id, user["id"], clean(cover_letter), now_iso(), now_iso()))
-        c.commit()
-        notify_job_owner(job_id, "Candidate Applied", f"{user['name']} has applied for your job posting.")
-    except sqlite3.IntegrityError:
-        c.close()
-        return RedirectResponse(f"/jobs/{job_id}?msg=You+have+already+applied+to+this+role.", status_code=303)
-    c.close()
-    return RedirectResponse(f"/jobs/{job_id}?ok=Application+submitted+successfully!", status_code=303)
-
-@app.post("/jobs/{job_id}/save")
-def bookmark_job(job_id: int, request: Request):
-    user = current_user(request)
-    if not user:
-        return redirect_login("Please sign in to save jobs.")
-    c = db()
-    c.execute("INSERT OR IGNORE INTO saved_jobs(user_id, job_id, created_at) VALUES(?,?,?)",
-              (user["id"], job_id, now_iso()))
-    c.commit()
-    c.close()
-    return RedirectResponse("/saved?ok=Role+saved+to+your+bookmarks.", status_code=303)
-
-@app.get("/saved", response_class=HTMLResponse)
-def view_saved(request: Request):
-    user = require_user(request)
-    c = db()
-    rows = c.execute("""
-        SELECT j.* FROM saved_jobs s
-        JOIN jobs j ON j.id = s.job_id
-        WHERE s.user_id = ?
-        ORDER BY s.created_at DESC
-    """, (user["id"],)).fetchall()
-    c.close()
-
-    cards = ""
-    for r in rows:
-        cards += f"""
-        <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
-          <div>
-            <h3><a href="/jobs/{r['id']}">{esc(r['title'])}</a></h3>
-            <div style="color:#64748b; font-size:13px;">{esc(r['company'])} • {esc(r['location'])}</div>
-          </div>
-          <div>
-            <a href="/jobs/{r['id']}" class="btn sm">Apply Now</a>
-          </div>
-        </div>
-        """
-    if not cards:
-        cards = '<div class="card empty">No bookmarked jobs found.</div>'
-
-    return HTMLResponse(render_page("Bookmarked Jobs", f"<h2>Saved Vacancies</h2><br>{cards}", user))
-
-@app.post("/jobs/{job_id}/report")
-def report_job(job_id: int, request: Request, reason: str = Form("Fraudulent/Spam")):
-    user = current_user(request)
-    if not user:
-        return redirect_login("Please sign in to report a listing.")
-    c = db()
-    c.execute("INSERT INTO reports(job_id, user_id, reason, details, created_at) VALUES(?,?,?,?,?)",
-              (job_id, user["id"], clean(reason), "Flagged via direct action", now_iso()))
-    c.commit()
-    c.close()
-    return RedirectResponse(f"/jobs/{job_id}?ok=Listing+has+been+reported+for+moderation.", status_code=303)
-
-# ============================================================
-# AUTHENTICATION: LOGIN, REGISTER, REAL/DEMO OTP & RECOVERY
-# ============================================================
-
-@app.get("/login", response_class=HTMLResponse)
-def login_view(request: Request, msg: str = "", ok: str = ""):
-    if current_user(request):
-        return RedirectResponse("/", status_code=303)
-    content = f"""
-    <div class="card" style="max-width:440px; margin:auto;">
-      <h2 style="margin-bottom:14px; text-align:center;">Welcome Back</h2>
-      <form method="post" action="/login">
-        <label>Email Address</label>
-        <input type="email" name="email" required autofocus>
-        <label>Password</label>
-        <input type="password" name="password" required>
-        <button class="btn" style="width:100%; margin-top:18px;" type="submit">Sign In with Password</button>
-      </form>
-      <div style="margin-top:18px; text-align:center; font-size:13px; color:#64748b;">
-        <a href="/login/otp" style="color:#2563eb; font-weight:600;">Sign in via Mobile/Email OTP</a> • 
-        <a href="/forgot-password" style="color:#2563eb;">Forgot Password?</a>
-      </div>
-      <div style="margin-top:14px; text-align:center; font-size:13px; color:#64748b;">
-        Don't have an account? <a href="/register" style="color:#2563eb; font-weight:700;">Create Account</a>
-      </div>
-    </div>
-    """
-    return HTMLResponse(render_page("Login", content, None, msg=msg, ok=ok))
-
-@app.post("/login")
-def login_post(email: str = Form(...), password: str = Form(...)):
-    email = clean(email).lower()
-    c = db()
-    u = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    c.close()
-    if not u or not verify_password(password, u["password_hash"]):
-        return redirect_login("Incorrect email or password credentials.")
-    if u["is_blocked"]:
-        return redirect_login("Your account has been suspended by administration.")
-
-    token = create_session(u["id"])
-    resp = RedirectResponse("/", status_code=303)
-    set_login_cookie(resp, token)
-    return resp
-
-@app.get("/login/otp", response_class=HTMLResponse)
-def login_otp_view(request: Request, step: str = "request", email: str = "", demo_otp: str = "", msg: str = ""):
-    if step == "request":
-        content = f"""
-        <div class="card" style="max-width:440px; margin:auto;">
-          <h2>OTP Sign-In</h2>
-          <p style="font-size:13px; color:#64748b; margin-top:4px;">Receive a secure login code via registered Email or SMS.</p>
-          <form method="post" action="/login/otp/request" style="margin-top:16px;">
-            <label>Registered Email</label>
-            <input type="email" name="email" required>
-            <button class="btn" style="width:100%; margin-top:16px;" type="submit">Generate OTP</button>
-          </form>
-        </div>
-        """
-    else:
-        demo_box = ""
-        if demo_otp:
-            demo_box = f'<div class="alert ok" style="text-align:center;"><b>Demo Simulation OTP:</b> {demo_otp}</div>'
-        content = f"""
-        <div class="card" style="max-width:440px; margin:auto;">
-          <h2>Enter Verification Code</h2>
-          <p style="font-size:13px; color:#64748b; margin-top:4px;">OTP sent to: <b>{esc(email)}</b></p>
-          {demo_box}
-          <form method="post" action="/login/otp/verify" style="margin-top:16px;">
-            <input type="hidden" name="email" value="{esc(email)}">
-            <label>6-Digit Verification Code</label>
-            <input type="text" name="otp" pattern="[0-9]{{6}}" required autofocus>
-            <button class="btn success" style="width:100%; margin-top:16px;" type="submit">Verify & Login</button>
-          </form>
-        </div>
-        """
-    return HTMLResponse(render_page("OTP Login", content, None, msg=msg))
-
-@app.post("/login/otp/request")
-def otp_request_post(email: str = Form(...)):
-    email = clean(email).lower()
-    c = db()
-    user = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-    c.close()
-    if not user:
-        return RedirectResponse("/login/otp?msg=No+account+found+with+that+email.", status_code=303)
-    if user["is_blocked"]:
-        return RedirectResponse("/login/otp?msg=Account+suspended.", status_code=303)
-
-    otp = create_otp(email, "login")
-    demo_mode, email_ok, sms_ok = deliver_otp(email, user["phone"], otp, "login")
-    demo_param = f"&demo_otp={otp}" if demo_mode else ""
-    return RedirectResponse(f"/login/otp?step=verify&email={urllib.parse.quote(email)}{demo_param}", status_code=303)
-
-@app.post("/login/otp/verify")
-def otp_verify_post(email: str = Form(...), otp: str = Form(...)):
-    email = clean(email).lower()
-    if not verify_otp(email, otp, "login"):
-        return RedirectResponse(f"/login/otp?step=verify&email={urllib.parse.quote(email)}&msg=Invalid+or+expired+code.", status_code=303)
-    c = db()
-    u = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-    c.close()
-    token = create_session(u["id"])
-    resp = RedirectResponse("/", status_code=303)
-    set_login_cookie(resp, token)
-    return resp
-
-@app.get("/register", response_class=HTMLResponse)
-def register_view(request: Request, msg: str = ""):
-    if current_user(request):
-        return RedirectResponse("/", status_code=303)
-    content = f"""
-    <div class="card" style="max-width:500px; margin:auto;">
-      <h2 style="margin-bottom:12px; text-align:center;">Create Your Free Account</h2>
-      <form method="post" action="/register">
-        <label>Full Name</label>
-        <input type="text" name="name" required>
-        <label>Email Address</label>
-        <input type="email" name="email" required>
-        <label>Mobile Phone (with country code)</label>
-        <input type="tel" name="phone" placeholder="+919876543210">
-        <label>Password (min 6 characters)</label>
-        <input type="password" name="password" required minlength="6">
-        <label>Account Intention</label>
-        <select name="role">
-          <option value="jobseeker">Job Seeker (Browse & Apply)</option>
-          <option value="employer">Employer / Recruiter (Post & Hire)</option>
-        </select>
-        <button class="btn" style="width:100%; margin-top:20px;" type="submit">Complete Registration</button>
-      </form>
-    </div>
-    """
-    return HTMLResponse(render_page("Register", content, None, msg=msg))
-
-@app.post("/register")
-def register_post(
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    phone: str = Form(""),
-    role: str = Form("jobseeker")
-):
-    email = clean(email).lower()
-    if not valid_email(email):
-        return RedirectResponse("/register?msg=Invalid+email+address+format.", status_code=303)
-    if role not in ("jobseeker", "employer"):
-        role = "jobseeker"
-
-    c = db()
-    if c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
-        c.close()
-        return RedirectResponse("/login?msg=Email+already+registered.+Please+sign+in.", status_code=303)
-
-    c.execute("""
-        INSERT INTO users(name, email, phone, password_hash, role, created_at)
-        VALUES(?,?,?,?,?,?)
-    """, (clean(name), email, clean(phone), hash_password(password), role, now_iso()))
-    user_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
-    c.commit()
-    c.close()
-
-    token = create_session(user_id)
-    resp = RedirectResponse("/", status_code=303)
-    set_login_cookie(resp, token)
-    return resp
-
-@app.get("/logout")
-def logout_handler(request: Request):
-    logout_user(request)
-    resp = RedirectResponse("/login?ok=Logged+out+successfully.", status_code=303)
-    resp.delete_cookie("jobmart_session")
-    return resp
-
-# ============================================================
-# JOBSEEKER PORTAL: RESUME BUILDER, PROFILE & APPLICATIONS
-# ============================================================
-
-@app.get("/seeker/dashboard", response_class=HTMLResponse)
-def seeker_dashboard(request: Request):
-    user = require_user(request)
-    c = db()
-    apps = c.execute("""
-        SELECT a.id as app_id, a.status, a.created_at as applied_at, j.title, j.company, j.location, j.id as job_id
-        FROM applications a
-        JOIN jobs j ON j.id = a.job_id
-        WHERE a.user_id = ?
-        ORDER BY a.created_at DESC
-    """, (user["id"],)).fetchall()
-    c.close()
-
-    rows = ""
-    for r in apps:
-        badge_cls = "green" if r["status"] == "Accepted" else ("red" if r["status"] == "Rejected" else "orange")
-        rows += f"""
-        <tr>
-          <td><b><a href="/jobs/{r['job_id']}">{esc(r['title'])}</a></b></td>
-          <td>{esc(r['company'])}</td>
-          <td>{esc(r['applied_at'][:10])}</td>
-          <td><span class="badge {badge_cls}">{esc(r['status'])}</span></td>
-        </tr>
-        """
-    if not rows:
-        rows = '<tr><td colspan="4" style="text-align:center; color:#64748b;">No active applications submitted yet.</td></tr>'
-
-    content = f"""
-    <div class="card">
-      <h2>Jobseeker Overview</h2>
-      <p style="color:#64748b; margin:4px 0 16px;">Track your submitted profiles and recruiter decisions.</p>
-      <table>
-        <thead>
-          <tr><th>Position</th><th>Company</th><th>Submission Date</th><th>Status</th></tr>
-        </thead>
-        <tbody>
-          {rows}
-        </tbody>
-      </table>
-    </div>
-    """
-    return HTMLResponse(render_page("Seeker Dashboard", content, user))
-
-@app.get("/profile", response_class=HTMLResponse)
-def profile_view(request: Request, msg: str = "", ok: str = ""):
-    u = require_user(request)
-    resume_view = ""
-    if u["resume_path"]:
-        resume_view = f'<p style="margin-top:6px; font-size:13px;"><a href="/profile/resume/download" target="_blank" style="color:#2563eb; font-weight:700;">📥 View Current Resume Document</a></p>'
-
-    content = f"""
-    <div class="card" style="max-width:760px; margin:auto;">
-      <h2>User Profile & Resume</h2>
-      <form method="post" action="/profile" enctype="multipart/form-data">
-        <div class="grid">
-          <div>
-            <label>Full Name</label>
-            <input type="text" name="name" value="{esc(u['name'])}" required>
-          </div>
-          <div>
-            <label>Phone Number</label>
-            <input type="tel" name="phone" value="{esc(u['phone'])}">
-          </div>
-        </div>
-        <div class="grid">
-          <div>
-            <label>Location / City</label>
-            <input type="text" name="location" value="{esc(u['location'])}">
-          </div>
-          <div>
-            <label>Role</label>
-            <input type="text" value="{esc(u['role'].capitalize())}" disabled style="background:#f1f5f9;">
-          </div>
-        </div>
-        <label>Professional Bio / Summary</label>
-        <textarea name="bio">{esc(u['bio'])}</textarea>
-        
-        <label>Key Skills (comma-separated)</label>
-        <input type="text" name="skills" value="{esc(u['skills'])}" placeholder="Python, FastAPI, Docker, PostgreSQL">
-        
-        <label>Upload New Resume (PDF / DOCX — Max {MAX_UPLOAD_MB}MB)</label>
-        <input type="file" name="resume" accept=".pdf,.doc,.docx">
-        {resume_view}
-
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:24px;">
-          <button class="btn" type="submit">Save Profile Updates</button>
-          <a href="/profile/resume-builder" class="btn secondary">Open Resume Builder</a>
-        </div>
-      </form>
-    </div>
-    """
-    return HTMLResponse(render_page("Profile Management", content, u, msg=msg, ok=ok))
-
-@app.post("/profile")
-def profile_update(
-    request: Request,
-    name: str = Form(...),
-    phone: str = Form(""),
-    location: str = Form(""),
-    bio: str = Form(""),
-    skills: str = Form(""),
-    resume: Optional[UploadFile] = File(None)
-):
-    u = require_user(request)
-    resume_path = u["resume_path"]
-
-    if resume and resume.filename:
-        ext = Path(resume.filename).suffix.lower()
-        if ext not in (".pdf", ".doc", ".docx"):
-            return RedirectResponse("/profile?msg=Only+PDF+and+DOCX+files+are+permitted.", status_code=303)
-        
-        dest = UPLOAD_DIR / f"resume_user_{u['id']}{ext}"
-        size = 0
-        with open(dest, "wb") as f:
-            while chunk := resume.file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_MB * 1024 * 1024:
-                    f.close()
-                    dest.unlink(missing_ok=True)
-                    return RedirectResponse(f"/profile?msg=File+size+exceeds+{MAX_UPLOAD_MB}MB+limit.", status_code=303)
-                f.write(chunk)
-        resume_path = str(dest)
-
-    c = db()
-    c.execute("""
-        UPDATE users SET name=?, phone=?, location=?, bio=?, skills=?, resume_path=?
-        WHERE id=?
-    """, (clean(name), clean(phone), clean(location), clean(bio), clean(skills), resume_path, u["id"]))
-    c.commit()
-    c.close()
-    return RedirectResponse("/profile?ok=Profile+successfully+updated.", status_code=303)
-
-@app.get("/profile/resume/download")
-def download_resume(request: Request):
-    u = require_user(request)
-    if not u["resume_path"] or not os.path.exists(u["resume_path"]):
-        raise HTTPException(status_code=404, detail="No resume document found")
-    return FileResponse(u["resume_path"], filename=Path(u["resume_path"]).name)
-
-@app.get("/profile/resume-builder", response_class=HTMLResponse)
-def resume_builder_view(request: Request):
-    u = require_user(request)
-    advice = ai_resume_advisor(u["skills"], u["bio"])
-    content = f"""
-    <div class="card" style="max-width:800px; margin:auto;">
-      <h2>Smart Resume Formatter</h2>
-      <div class="alert ok" style="margin-top:12px;">
-        <b>AI Recommendations:</b><br>
-        <pre style="white-space:pre-wrap; font-family:inherit; margin-top:4px;">{esc(advice)}</pre>
-      </div>
-      <div style="padding:16px; border:1px solid #cbd5e1; border-radius:8px; background:#fafafa; margin-top:16px;">
-        <h1 style="font-size:24px; margin-bottom:2px;">{esc(u['name'])}</h1>
-        <p style="color:#64748b; font-size:13px;">{esc(u['email'])} • {esc(u['phone'])} • {esc(u['location'])}</p>
-        <hr style="margin:12px 0; border:0; border-top:1px solid #e2e8f0;">
-        <h4 style="font-size:14px; text-transform:uppercase; color:#475569;">Profile Summary</h4>
-        <p style="font-size:14px; margin-top:4px;">{esc(u['bio'] or 'No summary specified.')}</p>
-        <hr style="margin:12px 0; border:0; border-top:1px solid #e2e8f0;">
-        <h4 style="font-size:14px; text-transform:uppercase; color:#475569;">Core Competencies</h4>
-        <p style="font-size:14px; margin-top:4px;">{esc(u['skills'] or 'Skills not yet provided.')}</p>
-      </div>
-      <div style="margin-top:18px; text-align:right;">
-        <button class="btn" onclick="window.print()">Print / Export PDF</button>
-      </div>
-    </div>
-    """
-    return HTMLResponse(render_page("Resume Builder", content, u))
-
-# ============================================================
-# EMPLOYER PORTAL: POST, MANAGE JOBS & SCREEN APPLICANTS
-# ============================================================
-
-@app.get("/jobs/post", response_class=HTMLResponse)
-def post_job_view(request: Request):
-    u = require_employer(request)
-    cat_opts = "".join([f'<option value="{esc(c)}">{esc(c)}</option>' for c in categories()])
-    content = f"""
-    <div class="card" style="max-width:760px; margin:auto;">
-      <h2>Post a New Job Opportunity</h2>
-      <form method="post" action="/jobs/post">
-        <label>Job Title</label>
-        <input type="text" name="title" required placeholder="Senior Backend Developer">
-        
-        <div class="grid">
-          <div>
-            <label>Hiring Company</label>
-            <input type="text" name="company" required placeholder="Acme Technologies Ltd">
-          </div>
-          <div>
-            <label>Domain Category</label>
-            <select name="category">{cat_opts}</select>
-          </div>
-        </div>
-
-        <div class="grid three">
-          <div>
-            <label>Country</label>
-            <input type="text" name="country" value="India" required>
-          </div>
-          <div>
-            <label>City / Location</label>
-            <input type="text" name="location" required placeholder="Hyderabad / Remote">
-          </div>
-          <div>
-            <label>Engagement Type</label>
-            <select name="job_type">
-              <option value="Full Time">Full Time</option>
-              <option value="Part Time">Part Time</option>
-              <option value="Contract">Contract</option>
-              <option value="Remote">Remote</option>
-              <option value="Internship">Internship</option>
-            </select>
-          </div>
-        </div>
-
-        <label>Salary Range (Annual / Monthly)</label>
-        <input type="text" name="salary" placeholder="₹12,00,000 - ₹18,00,000 PA">
-
-        <label>Required Skills & Tech Stack</label>
-        <input type="text" name="skills" placeholder="Python, FastAPI, SQL, Docker, AWS">
-
-        <label>Comprehensive Role Description</label>
-        <textarea name="description" required placeholder="Provide day-to-day responsibilities, perks, and qualifications..."></textarea>
-
-        <button class="btn" style="margin-top:20px;" type="submit">Publish Job Vacancy</button>
-      </form>
-    </div>
-    """
-    return HTMLResponse(render_page("Post Job", content, u))
-
-@app.post("/jobs/post")
-def post_job_action(
-    request: Request,
-    title: str = Form(...),
-    company: str = Form(...),
-    category: str = Form("Other"),
-    country: str = Form("India"),
-    location: str = Form(...),
-    job_type: str = Form("Full Time"),
-    salary: str = Form(""),
-    skills: str = Form(""),
-    description: str = Form(...)
-):
-    u = require_employer(request)
-    c = db()
-    c.execute("""
-        INSERT INTO jobs(employer_id, title, company, category, country, location, job_type, salary, skills, description, created_at, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        u["id"], clean(title), clean(company), category, clean(country),
-        clean(location), job_type, clean(salary), clean(skills),
-        clean(description), now_iso(), now_iso()
-    ))
-    c.commit()
-    c.close()
-    return RedirectResponse("/employer/dashboard?ok=Job+listing+published+live.", status_code=303)
-
-@app.get("/employer/dashboard", response_class=HTMLResponse)
-def employer_dashboard(request: Request, ok: str = "", msg: str = ""):
-    u = require_employer(request)
-    c = db()
-    jobs = c.execute("""
-        SELECT j.*, COUNT(a.id) as applicant_count 
-        FROM jobs j
-        LEFT JOIN applications a ON a.job_id = j.id
-        WHERE j.employer_id = ?
-        GROUP BY j.id
-        ORDER BY j.id DESC
-    """, (u["id"],)).fetchall()
-    c.close()
-
-    rows = ""
-    for j in jobs:
-        status_badge = "green" if j["status"] == "active" else "red"
-        rows += f"""
-        <tr>
-          <td><b><a href="/jobs/{j['id']}">{esc(j['title'])}</a></b></td>
-          <td>{esc(j['category'])}</td>
-          <td><span class="badge {status_badge}">{esc(j['status'])}</span></td>
-          <td><b>{j['applicant_count']}</b></td>
-          <td>
-            <a href="/employer/jobs/{j['id']}/applicants" class="btn sm">Review ({j['applicant_count']})</a>
-            <a href="/employer/jobs/{j['id']}/toggle" class="btn secondary sm">Toggle Status</a>
-          </td>
-        </tr>
-        """
-    if not rows:
-        rows = '<tr><td colspan="5" style="text-align:center; color:#64748b;">No vacancies listed yet. Create one!</td></tr>'
-
-    content = f"""
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h2>Employer Management Hub</h2>
-        <a href="/jobs/post" class="btn">+ Create Listing</a>
-      </div>
-      <table style="margin-top:16px;">
-        <thead>
-          <tr><th>Role Title</th><th>Category</th><th>Status</th><th>Applicants</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {rows}
-        </tbody>
-      </table>
-    </div>
-    """
-    return HTMLResponse(render_page("Employer Desk", content, u, ok=ok, msg=msg))
-
-@app.get("/employer/jobs/{job_id}/toggle")
-def toggle_job_status(job_id: int, request: Request):
-    u = require_employer(request)
-    c = db()
-    job = c.execute("SELECT employer_id, status FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not job or (job["employer_id"] != u["id"] and u["role"] != "admin"):
-        c.close()
-        raise HTTPException(status_code=403, detail="Unauthorized action")
-    new_status = "closed" if job["status"] == "active" else "active"
-    c.execute("UPDATE jobs SET status=?, updated_at=? WHERE id=?", (new_status, now_iso(), job_id))
-    c.commit()
-    c.close()
-    return RedirectResponse("/employer/dashboard?ok=Vacancy+status+updated.", status_code=303)
-
-@app.get("/employer/jobs/{job_id}/applicants", response_class=HTMLResponse)
-def view_job_applicants(job_id: int, request: Request):
-    u = require_employer(request)
-    c = db()
-    job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-    if not job or (job["employer_id"] != u["id"] and u["role"] != "admin"):
-        c.close()
-        raise HTTPException(status_code=403, detail="Listing does not belong to you")
-
-    apps = c.execute("""
-        SELECT a.id as app_id, a.status, a.cover_letter, a.created_at,
-               u.id as user_id, u.name, u.email, u.phone, u.skills, u.resume_path
-        FROM applications a
-        JOIN users u ON u.id = a.user_id
-        WHERE a.job_id = ?
-        ORDER BY a.created_at DESC
-    """, (job_id,)).fetchall()
-    c.close()
-
-    cards = ""
-    for a in apps:
-        resume_btn = ""
-        if a["resume_path"]:
-            resume_btn = f'<a href="/profile/resume/download" class="btn secondary sm">Download CV</a>'
-        
-        cards += f"""
-        <div class="card">
-          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-            <div>
-              <h3>{esc(a['name'])}</h3>
-              <div style="font-size:13px; color:#64748b;">📧 {esc(a['email'])} • 📞 {esc(a['phone'])}</div>
-              <p style="margin-top:8px; font-size:14px;"><b>Skills:</b> {esc(a['skills'])}</p>
-              <div style="margin-top:10px; padding:10px; background:#f8fafc; border-radius:6px; font-size:13px;">
-                <b>Cover Note:</b> {esc(a['cover_letter'] or 'None')}
-              </div>
-            </div>
-            <div style="text-align:right;">
-              <span class="badge">{esc(a['status'])}</span>
-              <div style="margin-top:12px; display:flex; gap:6px;">
-                {resume_btn}
-                <form action="/employer/applications/{a['app_id']}/decision" method="post" style="display:inline;">
-                  <input type="hidden" name="status" value="Accepted">
-                  <button class="btn success sm" type="submit">Shortlist</button>
-                </form>
-                <form action="/employer/applications/{a['app_id']}/decision" method="post" style="display:inline;">
-                  <input type="hidden" name="status" value="Rejected">
-                  <button class="btn danger sm" type="submit">Decline</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-        """
-    if not cards:
-        cards = '<div class="card empty">No applicants have registered for this posting yet.</div>'
-
-    content = f"""
-    <h2>Applicants for: {esc(job['title'])}</h2>
-    <p style="color:#64748b; margin-bottom:16px;">Review candidate profiles and update pipeline status.</p>
-    {cards}
-    """
-    return HTMLResponse(render_page("Applicants Review", content, u))
-
-@app.post("/employer/applications/{app_id}/decision")
-def update_application_decision(app_id: int, request: Request, status: str = Form(...)):
-    u = require_employer(request)
-    c = db()
-    app_row = c.execute("""
-        SELECT a.id, a.user_id, a.job_id, j.title, j.employer_id 
-        FROM applications a
-        JOIN jobs j ON j.id = a.job_id
-        WHERE a.id = ?
-    """, (app_id,)).fetchone()
-
-    if not app_row or (app_row["employer_id"] != u["id"] and u["role"] != "admin"):
-        c.close()
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-    c.execute("UPDATE applications SET status=?, updated_at=? WHERE id=?", (status, now_iso(), app_id))
-    c.commit()
-    c.close()
-
-    notify(app_row["user_id"], "Application Status Change", f"Your status for '{app_row['title']}' is now: {status}")
-    return RedirectResponse(f"/employer/jobs/{app_row['job_id']}/applicants", status_code=303)
-
-# ============================================================
-# LIVE AI CUSTOMER CARE & SYSTEM NOTIFICATIONS
-# ============================================================
-
-@app.get("/ai-assistant", response_class=HTMLResponse)
-def ai_assistant_view(request: Request):
-    user = current_user(request)
-    content = f"""
-    <div class="card" style="max-width:700px; margin:auto;">
-      <h2>🤖 Job Mart AI Intelligence</h2>
-      <p style="font-size:13px; color:#64748b; margin:4px 0 16px;">Ask anything about recruitment, scams, resumes, or platform tools.</p>
-      <div id="chatbox" style="height:320px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:8px; padding:14px; background:#f8fafc;">
-        <div style="margin-bottom:10px;"><b>AI:</b> Hello! How can I assist your career or hiring workflow today?</div>
-      </div>
-      <div style="display:flex; gap:8px; margin-top:14px;">
-        <input type="text" id="userInput" placeholder="Type your query here..." style="margin-top:0;">
-        <button class="btn" onclick="sendQuery()">Submit</button>
-      </div>
-    </div>
-    <script>
-    async function sendQuery(){{
-      const inp = document.getElementById('userInput');
-      const val = inp.value.trim();
-      if(!val) return;
-      const box = document.getElementById('chatbox');
-      box.innerHTML += '<div style="margin-bottom:8px; color:#1e40af;"><b>You:</b> ' + val + '</div>';
-      inp.value = '';
-      box.scrollTop = box.scrollHeight;
-      
-      const res = await fetch('/api/ai/chat', {{
-        method: 'POST',
-        headers: {{'Content-Type':'application/json'}},
-        body: JSON.stringify({{query: val}})
-      }});
-      const data = await res.json();
-      box.innerHTML += '<div style="margin-bottom:8px; color:#15803d;"><b>AI:</b> ' + data.reply + '</div>';
-      box.scrollTop = box.scrollHeight;
-    }}
-    </script>
-    """
-    return HTMLResponse(render_page("AI Assistant", content, user))
-
-@app.post("/api/ai/chat")
-async def api_ai_chat(request: Request):
-    user = current_user(request)
-    data = await request.json()
-    query = data.get("query", "")
-    role = user["role"] if user else "guest"
-    reply = ai_support_chat(query, role)
-    return {"reply": reply}
-
-@app.get("/notifications", response_class=HTMLResponse)
-def notifications_view(request: Request):
-    user = require_user(request)
-    c = db()
-    rows = c.execute("SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 50", (user["id"],)).fetchall()
-    c.execute("UPDATE notifications SET read=1 WHERE user_id=?", (user["id"],))
-    c.commit()
-    c.close()
-
-    items = ""
-    for r in rows:
-        items += f"""
-        <div class="card" style="padding:14px 18px; margin-bottom:10px;">
-          <b style="color:#1e293b;">{esc(r['title'])}</b>
-          <p style="margin-top:4px; font-size:14px; color:#475569;">{esc(r['message'])}</p>
-          <span style="font-size:11px; color:#94a3b8;">{esc(r['created_at'][:19])}</span>
-        </div>
-        """
-    if not items:
-        items = '<div class="card empty">No notifications available.</div>'
-    return HTMLResponse(render_page("Notifications", f"<h2>Recent Activity</h2><br>{items}", user))
-
-# ============================================================
-# COMPREHENSIVE ADMIN PANEL (MODERATION & USER SUSPENSION)
-# ============================================================
-
-@app.get("/admin", response_class=HTMLResponse)
-def admin_panel(request: Request, ok: str = ""):
-    u = require_admin(request)
-    c = db()
-    users_cnt = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    jobs_cnt = c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    apps_cnt = c.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-    reports_cnt = c.execute("SELECT COUNT(*) FROM reports WHERE status='open'").fetchone()[0]
-
-    all_users = c.execute("SELECT id, name, email, role, is_blocked FROM users ORDER BY id DESC LIMIT 20").fetchall()
-    reports = c.execute("""
-        SELECT r.*, j.title, u.email as reporter_email 
-        FROM reports r
-        JOIN jobs j ON j.id = r.job_id
-        JOIN users u ON u.id = r.user_id
-        WHERE r.status = 'open'
-        ORDER BY r.id DESC
-    """).fetchall()
-    c.close()
-
-    user_rows = ""
-    for user_row in all_users:
-        status_txt = "Active" if not user_row["is_blocked"] else "BLOCKED"
-        action_btn = f'<a href="/admin/users/{user_row["id"]}/block" class="btn danger sm">Suspend</a>' if not user_row["is_blocked"] else f'<a href="/admin/users/{user_row["id"]}/unblock" class="btn success sm">Restore</a>'
-        user_rows += f"""
-        <tr>
-          <td>{user_row['id']}</td>
-          <td><b>{esc(user_row['name'])}</b></td>
-          <td>{esc(user_row['email'])}</td>
-          <td>{esc(user_row['role'])}</td>
-          <td>{status_txt}</td>
-          <td>{action_btn}</td>
-        </tr>
-        """
-
-    report_rows = ""
-    for rep in reports:
-        report_rows += f"""
-        <tr>
-          <td>Job #{rep['job_id']}: {esc(rep['title'])}</td>
-          <td>{esc(rep['reporter_email'])}</td>
-          <td>{esc(rep['reason'])}</td>
-          <td>
-            <a href="/admin/jobs/{rep['job_id']}/dismiss" class="btn danger sm">Delete Job</a>
-            <a href="/admin/reports/{rep['id']}/resolve" class="btn secondary sm">Ignore</a>
-          </td>
-        </tr>
-        """
-    if not report_rows:
-        report_rows = '<tr><td colspan="4" style="text-align:center; color:#64748b;">No active moderation flags.</td></tr>'
-
-    content = f"""
-    <h2>Platform Administration</h2>
-    <div class="grid four" style="margin:20px 0;">
-      <div class="stats-box">Users<b>{users_cnt}</b></div>
-      <div class="stats-box">Total Jobs<b>{jobs_cnt}</b></div>
-      <div class="stats-box">Applications<b>{apps_cnt}</b></div>
-      <div class="stats-box">Pending Reports<b>{reports_cnt}</b></div>
-    </div>
-
-    <div class="card">
-      <h3>Flagged Job Moderation Queue</h3>
-      <table>
-        <thead><tr><th>Listing</th><th>Reporter</th><th>Reason</th><th>Action</th></tr></thead>
-        <tbody>{report_rows}</tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <h3>User Directory & Permissions</h3>
-      <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Control</th></tr></thead>
-        <tbody>{user_rows}</tbody>
-      </table>
-    </div>
-    """
-    return HTMLResponse(render_page("Administration Console", content, u, ok=ok))
-
-@app.get("/admin/users/{user_id}/block")
-def admin_block_user(user_id: int, request: Request):
-    require_admin(request)
-    c = db()
-    c.execute("UPDATE users SET is_blocked=1 WHERE id=?", (user_id,))
-    c.commit()
-    c.close()
-    return RedirectResponse("/admin?ok=User+suspended.", status_code=303)
-
-@app.get("/admin/users/{user_id}/unblock")
-def admin_unblock_user(user_id: int, request: Request):
-    require_admin(request)
-    c = db()
-    c.execute("UPDATE users SET is_blocked=0 WHERE id=?", (user_id,))
-    c.commit()
-    c.close()
-    return RedirectResponse("/admin?ok=User+restored.", status_code=303)
-
-@app.get("/admin/jobs/{job_id}/dismiss")
-def admin_delete_job(job_id: int, request: Request):
-    require_admin(request)
-    c = db()
-    c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
-    c.execute("UPDATE reports SET status='resolved' WHERE job_id=?", (job_id,))
-    c.commit()
-    c.close()
-    return RedirectResponse("/admin?ok=Job+listing+purged.", status_code=303)
-
-@app.get("/admin/reports/{rep_id}/resolve")
-def admin_resolve_report(rep_id: int, request: Request):
-    require_admin(request)
-    c = db()
-    c.execute("UPDATE reports SET status='resolved' WHERE id=?", (rep_id,))
-    c.commit()
-    c.close()
-    return RedirectResponse("/admin?ok=Flag+resolved.", status_code=303)
-
-# ============================================================
-# PRODUCTION REST API CHANNELS (/api/me, /api/jobs, etc.)
-# ============================================================
-
-@app.get("/api/me")
-def api_me(request: Request):
-    u = current_user(request)
-    if not u:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {
-        "id": u["id"],
-        "name": u["name"],
-        "email": u["email"],
-        "role": u["role"],
-        "phone": u["phone"],
-        "location": u["location"],
-        "skills": u["skills"],
-        "bio": u["bio"],
-        "has_resume": bool(u["resume_path"])
-    }
+    users_html="".join(f"""<tr><td>{x["id"]}</td><td>{esc(x["name"])}<br>{esc(x["email"])}</td><td>{esc(x["role"])}</td>
+<td>{'Blocked' if x["is_blocked"] else 'Active'}</td><td><form method="post" action="/admin/user/{x["id"]}/toggle"><button class="btn small">{'Unblock' if x["is_blocked"] else 'Block'}</button></form></td></tr>""" for x in users)
+    jobs_html="".join(f"""<tr><td>{x["id"]}</td><td>{esc(x["title"])}</td><td>{esc(x["employer"])}</td><td>{'Flagged' if x["is_flagged"] else x["status"]}</td>
+<td><form method="post" action="/admin/job/{x["id"]}/toggleflag"><button class="btn small">{'Clear Flag' if x["is_flagged"] else 'Flag'}</button></form></td></tr>""" for x in jobs)
+    reports_html="".join(f"<tr><td>{r['id']}</td><td>{esc(r['title'])}</td><td>{esc(r['name'])}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td></tr>" for r in reports)
+    body=f"""<h1>Admin Panel</h1><div class="stats"><div class="stat"><strong>{stats[0]}</strong>Users</div><div class="stat"><strong>{stats[1]}</strong>Jobs</div><div class="stat"><strong>{stats[2]}</strong>Applications</div><div class="stat"><strong>{stats[3]}</strong>Open Reports</div></div>
+<div class="card" style="margin-top:18px"><h2>Users</h2><div class="table-wrap"><table><tr><th>ID</th><th>User</th><th>Role</th><th>Status</th><th>Action</th></tr>{users_html}</table></div></div>
+<div class="card"><h2>Jobs</h2><div class="table-wrap"><table><tr><th>ID</th><th>Job</th><th>Employer</th><th>Status</th><th>Action</th></tr>{jobs_html}</table></div></div>
+<div class="card"><h2>Reports</h2><div class="table-wrap"><table><tr><th>ID</th><th>Job</th><th>Reporter</th><th>Reason</th><th>Status</th></tr>{reports_html or '<tr><td colspan="5">No reports.</td></tr>'}</table></div></div>"""
+    return layout(request,"Admin",body)
+
+@app.post("/admin/user/{user_id}/toggle")
+def admin_user_toggle(request:Request,user_id:int):
+    require_admin(request); c=db()
+    c.execute("UPDATE users SET is_blocked=CASE WHEN is_blocked=1 THEN 0 ELSE 1 END WHERE id=? AND email<>?",(user_id,ADMIN_EMAIL))
+    c.commit(); c.close(); return RedirectResponse("/admin",303)
+
+@app.post("/admin/job/{job_id}/toggleflag")
+def admin_job_flag(request:Request,job_id:int):
+    require_admin(request); c=db(); c.execute("UPDATE jobs SET is_flagged=CASE WHEN is_flagged=1 THEN 0 ELSE 1 END WHERE id=?",(job_id,)); c.commit(); c.close()
+    return RedirectResponse("/admin",303)
+
+# ---------- REST API ----------
+@app.get("/api/health")
+def health():
+    return {"status":"ok","app":APP_NAME,"version":"4.0.0","time":now_iso()}
 
 @app.get("/api/jobs")
-def api_jobs(q: str = "", category: str = "", limit: int = 50):
-    c = db()
-    sql = "SELECT id, title, company, category, location, job_type, salary, created_at FROM jobs WHERE status='active' AND is_flagged=0"
-    params = []
-    if q:
-        sql += " AND (title LIKE ? OR skills LIKE ? OR company LIKE ?)"
-        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
-    if category and category != "All":
-        sql += " AND category = ?"
-        params.append(category)
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-    rows = c.execute(sql, params).fetchall()
-    c.close()
-    return [dict(r) for r in rows]
+def api_jobs(q:str="",location:str="",category:str=""):
+    c=db(); sql="SELECT id,title,company,location,job_type,salary,category,status,created_at FROM jobs WHERE status='active' AND is_flagged=0"; p=[]
+    if q: sql+=" AND (title LIKE ? OR description LIKE ? OR skills LIKE ?)"; x=f"%{q}%"; p += [x,x,x]
+    if location: sql+=" AND location LIKE ?"; p.append(f"%{location}%")
+    if category: sql+=" AND category=?"; p.append(category)
+    sql+=" ORDER BY id DESC LIMIT 100"
+    rows=[dict(x) for x in c.execute(sql,p).fetchall()]; c.close(); return {"jobs":rows}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": now_iso(), "version": "3.5.0"}
+@app.get("/api/me")
+def api_me(request:Request):
+    u=require_user(request)
+    return {"id":u["id"],"name":u["name"],"email":u["email"],"role":u["role"],"phone":u["phone"],"location":u["location"]}
 
-if __name__ == "__main__":
+@app.get("/api/stats")
+def api_stats():
+    c=db()
+    data={"users":c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"],
+          "jobs":c.execute("SELECT COUNT(*) n FROM jobs WHERE status='active'").fetchone()["n"],
+          "applications":c.execute("SELECT COUNT(*) n FROM applications").fetchone()["n"]}
+    c.close(); return data
+
+@app.exception_handler(404)
+async def not_found(request,exc):
+    return HTMLResponse(layout(request,"Not Found",'<div class="card empty"><h1>404</h1><p>Page not found.</p><a class="btn" href="/">Go Home</a></div>'),404)
+
+@app.exception_handler(500)
+async def server_error(request,exc):
+    return HTMLResponse(layout(request,"Error",'<div class="card empty"><h1>Something went wrong</h1><p>Please try again.</p></div>'),500)
+
+if __name__=="__main__":
     import uvicorn
-    print(f"Starting {APP_NAME} Production Server on http://0.0.0.0:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app",host="0.0.0.0",port=int(os.getenv("PORT","8000")))
