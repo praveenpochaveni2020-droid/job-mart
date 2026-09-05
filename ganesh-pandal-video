@@ -1,0 +1,11 @@
+ganesh-pandal-video/
+│
+├── input/
+│   ├── street.jpg
+│   └── ganesha.jpg
+│
+├── create_video.py
+├── requirements.txt
+└── .github/
+    └── workflows/
+        └── video.yml
